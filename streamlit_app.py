@@ -7,9 +7,7 @@ st.title("Secondary Market Relative Value Dashboard")
 st.caption("Prototype: Issuer vs AA/AAA Benchmark")
 st.sidebar.header("User Inputs")
 
-# =========================
 # Issuer Universe Setup
-# =========================
 
 ISSUER_FILE = "data/issuers.csv"
 
@@ -39,9 +37,7 @@ issuer_df = issuer_df.sort_values(["Sector", "Issuer"])
 # Save cleaned version
 issuer_df.to_csv(ISSUER_FILE, index=False)
 
-# =========================
 # Select Sector First
-# =========================
 
 sector_list = sorted(issuer_df["Sector"].dropna().unique().tolist())
 
@@ -51,9 +47,8 @@ selected_sector = st.sidebar.selectbox(
     index=None,
     placeholder="Search or select sector..."
 )
-# =========================
+
 # Other Inputs
-# =========================
 
 maturity = st.sidebar.selectbox(
     "Maturity Bucket",
