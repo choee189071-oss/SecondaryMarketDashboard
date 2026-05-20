@@ -796,56 +796,87 @@ else:
 
         st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Trading Frequency by CUSIP")
+  # ============================================================
+# Liquidity / Trading Frequency Analysis
+# ============================================================
 
-freq_fig = px.bar(
-    liq.sort_values("trade_count", ascending=False).head(25),
-    x="cusip",
-    y="trade_count",
-    color="liquidity_tier",
-    hover_data=[
-        "recent_90d_trades",
-        "avg_trades_per_month",
-        "days_since_last_trade",
-        "total_trade_amount"
-    ],
-    title="Top 25 Most Frequently Traded CUSIPs"
+st.subheader("Liquidity / Trading Frequency Analysis by CUSIP")
+
+today = pd.Timestamp.today().normalize()
+
+liq_base = issuer_trades.copy()
+liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
+
+liq = (
+    liq_base
+    .groupby("cusip", dropna=False)
+    .agg(
+        trade_count=("trade_date", "count"),
+        first_trade=("trade_date", "min"),
+        latest_trade=("trade_date", "max"),
+        active_months=("trade_month", "nunique"),
+        avg_yield=("yield", "mean"),
+        min_yield=("yield", "min"),
+        max_yield=("yield", "max"),
+        avg_price=("price", "mean"),
+        total_trade_amount=("trade_amount", "sum"),
+        avg_trade_amount=("trade_amount", "mean"),
+        maturity=("maturity_bond", "first"),
+        coupon=("coupon_bond", "first"),
+        outstanding_amount=("outstanding_amount", "first"),
+    )
+    .reset_index()
 )
 
-freq_fig.update_layout(
-    xaxis_title="CUSIP",
-    yaxis_title="Trade Count",
-    legend_title="Liquidity Tier"
+liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
+liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
+liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
+liq["avg_trades_per_month"] = liq["trade_count"] / liq["active_months"].clip(lower=1)
+
+recent_cutoff = today - pd.DateOffset(days=90)
+
+recent_activity = (
+    liq_base[liq_base["trade_date"] >= recent_cutoff]
+    .groupby("cusip")
+    .agg(recent_90d_trades=("trade_date", "count"))
+    .reset_index()
 )
 
-st.plotly_chart(freq_fig, use_container_width=True)
+liq = liq.merge(recent_activity, on="cusip", how="left")
+liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
 
+liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
+liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"]
 
-st.subheader("Recent Activity vs Total Volume")
-
-volume_fig = px.scatter(
-    liq,
-    x="days_since_last_trade",
-    y="total_trade_amount",
-    size="trade_count",
-    color="liquidity_tier",
-    hover_data=[
-        "cusip",
-        "recent_90d_trades",
-        "avg_days_between_trades",
-        "avg_yield",
-        "maturity"
-    ],
-    title="Liquidity Map: Recency vs Trading Volume"
+liq["liquidity_score"] = (
+    liq["trade_count"].rank(pct=True) * 35
+    + liq["total_trade_amount"].rank(pct=True) * 25
+    + liq["recent_90d_trades"].rank(pct=True) * 25
+    + (1 - liq["days_since_last_trade"].rank(pct=True)) * 15
 )
 
-volume_fig.update_layout(
-    xaxis_title="Days Since Last Trade",
-    yaxis_title="Total Trade Amount",
-    legend_title="Liquidity Tier"
+def liquidity_tier(score, days_since_last_trade):
+    if pd.isna(score):
+        return "Unknown"
+    if days_since_last_trade > 365:
+        return "Stale"
+    if score >= 75:
+        return "High Liquidity"
+    if score >= 45:
+        return "Medium Liquidity"
+    return "Low Liquidity"
+
+liq["liquidity_tier"] = liq.apply(
+    lambda row: liquidity_tier(row["liquidity_score"], row["days_since_last_trade"]),
+    axis=1
 )
 
-st.plotly_chart(volume_fig, use_container_width=True)
+liq = liq.sort_values(
+    ["liquidity_score", "trade_count", "total_trade_amount"],
+    ascending=False
+)
+
+st.dataframe(liq, use_container_width=True)
 
 # ============================================================
 # Liquidity Visualizations
