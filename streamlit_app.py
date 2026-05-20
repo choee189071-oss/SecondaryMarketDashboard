@@ -637,12 +637,20 @@ st.header("Yield Trend / Relative Value Comparison")
 if market_df.empty:
     st.info("No trade data available for yield comparison.")
 else:
-    compare_issuers = st.multiselect(
-        "Compare Issuers",
-        options=sorted(market_df["issuer"].dropna().unique().tolist()),
-        default=[selected_issuer] if selected_issuer else []
-    )
+    issuer_options = sorted(
+    market_df["issuer"].dropna().unique().tolist()
+)
 
+default_issuers = []
+
+if selected_issuer and selected_issuer in issuer_options:
+    default_issuers = [selected_issuer]
+
+compare_issuers = st.multiselect(
+    "Compare Issuers",
+    options=issuer_options,
+    default=default_issuers
+)
     compare_bucket = st.selectbox(
         "Comparison Maturity Bucket",
         ["All", "Short", "10Y", "20Y", "30Y"],
