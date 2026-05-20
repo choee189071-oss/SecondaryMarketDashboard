@@ -1,248 +1,750 @@
-import streamlit as st
+import os
+import glob
+import re
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
-import os
+import streamlit as st
 
-st.title("Secondary Market Relative Value Dashboard")
-st.caption("Prototype: Issuer vs AA/AAA Benchmark")
-st.sidebar.header("User Inputs")
 
-# Issuer Universe Setup
+# ============================================================
+# Page Setup
+# ============================================================
 
-ISSUER_FILE = "data/issuers.csv"
-
-if not os.path.exists(ISSUER_FILE):
-    os.makedirs("data", exist_ok=True)
-    pd.DataFrame({"Issuer": [], "Sector": []}).to_csv(ISSUER_FILE, index=False)
-
-issuer_df = pd.read_csv(ISSUER_FILE)
-
-# Make sure required columns exist
-if "Issuer" not in issuer_df.columns:
-    issuer_df["Issuer"] = ""
-
-if "Sector" not in issuer_df.columns:
-    issuer_df["Sector"] = "Unclassified"
-
-# Clean data
-issuer_df["Issuer"] = issuer_df["Issuer"].astype(str).str.strip()
-issuer_df["Sector"] = issuer_df["Sector"].astype(str).str.strip()
-
-issuer_df = issuer_df[issuer_df["Issuer"] != ""]
-issuer_df["Sector"] = issuer_df["Sector"].replace("", "Unclassified")
-
-issuer_df = issuer_df.drop_duplicates(subset=["Issuer"], keep="first")
-issuer_df = issuer_df.sort_values(["Sector", "Issuer"])
-
-# Save cleaned version
-issuer_df.to_csv(ISSUER_FILE, index=False)
-
-# Select Sector First
-
-sector_list = sorted(issuer_df["Sector"].dropna().unique().tolist())
-
-selected_sector = st.sidebar.selectbox(
-    "Select Sector",
-    sector_list,
-    index=None,
-    placeholder="Search or select sector..."
+st.set_page_config(
+    page_title="Secondary Market Relative Value Dashboard",
+    layout="wide"
 )
 
-# Other Inputs
+st.title("Secondary Market Relative Value Dashboard")
+st.caption("Issuer / Bond / Trade History Dashboard")
 
-maturity = st.sidebar.selectbox(
+
+# ============================================================
+# File Paths
+# ============================================================
+
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+
+BONDS_FILE_CANDIDATES = [
+    DATA_DIR / "Bonds.csv",
+    DATA_DIR / "bonds.csv",
+]
+
+ISSUER_FILE = DATA_DIR / "issuers.csv"
+
+MMD_FILE_CANDIDATES = [
+    DATA_DIR / "mmd.csv",
+    DATA_DIR / "mmd_curve.csv",
+]
+
+TRADE_FILE_PATTERNS = [
+    str(DATA_DIR / "trades" / "*.xlsx"),
+    str(DATA_DIR / "trades" / "*.xls"),
+    str(DATA_DIR / "trades" / "*.csv"),
+    str(DATA_DIR / "*_Trade.xlsx"),
+    str(DATA_DIR / "*_Trades.xlsx"),
+    str(DATA_DIR / "*_trade.xlsx"),
+    str(DATA_DIR / "*_trades.xlsx"),
+    str(DATA_DIR / "*Trade*.xlsx"),
+    str(DATA_DIR / "*Trade*.csv"),
+]
+
+
+# ============================================================
+# Utility Functions
+# ============================================================
+
+def find_first_existing(paths):
+    for p in paths:
+        if Path(p).exists():
+            return Path(p)
+    return None
+
+
+def clean_colname(col):
+    return (
+        str(col)
+        .strip()
+        .lower()
+        .replace("/", "_")
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def clean_money_series(s):
+    return (
+        s.astype(str)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.strip()
+        .replace({"": pd.NA, "nan": pd.NA, "None": pd.NA})
+    )
+
+
+def clean_numeric(s):
+    return pd.to_numeric(clean_money_series(s), errors="coerce")
+
+
+def clean_cusip(s):
+    return (
+        s.astype(str)
+        .str.strip()
+        .str.replace(r"\.0$", "", regex=True)
+        .replace({"nan": pd.NA, "": pd.NA})
+    )
+
+
+def normalize_text(s):
+    if pd.isna(s):
+        return pd.NA
+    return str(s).strip()
+
+
+def save_issuers(issuers_df):
+    issuers_df = issuers_df.copy()
+
+    needed = ["issuer", "sector", "primary_type", "notes"]
+    for col in needed:
+        if col not in issuers_df.columns:
+            issuers_df[col] = pd.NA
+
+    issuers_df["issuer"] = issuers_df["issuer"].astype(str).str.strip()
+    issuers_df["sector"] = issuers_df["sector"].astype(str).str.strip()
+
+    issuers_df = issuers_df[issuers_df["issuer"].notna()]
+    issuers_df = issuers_df[issuers_df["issuer"] != ""]
+    issuers_df = issuers_df.drop_duplicates(subset=["issuer"], keep="last")
+    issuers_df = issuers_df.sort_values(["sector", "issuer"])
+
+    issuers_df[needed].to_csv(ISSUER_FILE, index=False)
+
+
+def standardize_bonds(df):
+    df = df.copy()
+    df.columns = [clean_colname(c) for c in df.columns]
+
+    rename_map = {
+        "cusip": "cusip",
+        "cusip9": "cusip",
+        "issuer": "issuer",
+        "secondary_credit": "secondary_credit",
+        "maturity": "maturity",
+        "maturity_date": "maturity",
+        "par_amount": "par_amount",
+        "outstanding_amount": "outstanding_amount",
+        "coupon": "coupon",
+        "call_date": "call_date",
+        "call_price": "call_price",
+        "fed_tax": "fed_tax",
+        "tax_status": "fed_tax",
+        "amt": "amt",
+        "series": "series",
+        "election": "election",
+        "type": "type",
+        "lien": "lien",
+        "term": "term",
+        "sector": "sector",
+        "primary_type": "primary_type",
+    }
+
+    df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
+
+    required_cols = [
+        "issuer", "type", "lien", "election", "series", "cusip",
+        "secondary_credit", "term", "maturity", "par_amount",
+        "outstanding_amount", "coupon", "call_date", "call_price",
+        "fed_tax", "amt", "sector", "primary_type"
+    ]
+
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df["cusip"] = clean_cusip(df["cusip"])
+    df["issuer"] = df["issuer"].astype(str).str.strip()
+    df["sector"] = df["sector"].astype(str).str.strip().replace({"nan": pd.NA, "": pd.NA})
+    df["primary_type"] = df["primary_type"].astype(str).str.strip().replace({"nan": pd.NA, "": pd.NA})
+
+    df["series"] = df["series"].astype(str).str.strip().replace({"nan": pd.NA})
+    df["secondary_credit"] = df["secondary_credit"].astype(str).str.strip().replace({"nan": pd.NA})
+    df["term"] = df["term"].astype(str).str.strip().replace({"nan": pd.NA})
+
+    df["maturity"] = pd.to_datetime(df["maturity"], errors="coerce")
+    df["call_date"] = pd.to_datetime(df["call_date"], errors="coerce")
+
+    df["par_amount"] = clean_numeric(df["par_amount"])
+    df["outstanding_amount"] = clean_numeric(df["outstanding_amount"])
+    df["coupon"] = clean_numeric(df["coupon"])
+    df["call_price"] = clean_numeric(df["call_price"])
+
+    df = df[df["cusip"].notna()].copy()
+    df = df[df["maturity"].notna()].copy()
+
+    today = pd.Timestamp.today().normalize()
+    df["years_to_maturity"] = (df["maturity"] - today).dt.days / 365.25
+
+    return df[required_cols + ["years_to_maturity"]]
+
+
+def read_trade_file(path):
+    path = Path(path)
+
+    if path.suffix.lower() in [".xlsx", ".xls"]:
+        try:
+            return pd.read_excel(path, sheet_name="ag-grid", dtype={"CUSIP9": str})
+        except Exception:
+            return pd.read_excel(path, dtype={"CUSIP9": str})
+
+    return pd.read_csv(path, dtype={"CUSIP9": str, "cusip": str})
+
+
+def infer_issuer_from_filename(path):
+    stem = Path(path).stem
+    stem = re.sub(r"[_\-\s]*(Trade|Trades|trade|trades)\s*$", "", stem)
+    stem = stem.replace("_", " ").strip()
+    return stem
+
+
+def standardize_trades(df, source_file=None):
+    df = df.copy()
+    df.columns = [clean_colname(c) for c in df.columns]
+
+    rename_map = {
+        "trade_date_time": "trade_datetime",
+        "cusip9": "cusip",
+        "description": "description",
+        "maturity_date": "maturity",
+        "trade_date": "trade_date",
+        "settlement_date": "settlement_date",
+        "coupon": "coupon",
+        "yield": "yield",
+        "price": "price",
+        "trade_amount": "trade_amount",
+        "calculation_date": "calculation_date",
+        "calculation_price": "calculation_price",
+        "index": "index",
+        "index_rate": "index_rate",
+        "spread": "spread",
+        "trade_type": "trade_type",
+        "ratings_m_s_f": "ratings_m_s_f",
+    }
+
+    df = df.rename(columns={c: rename_map.get(c, c) for c in df.columns})
+
+    required_cols = [
+        "trade_datetime", "cusip", "description", "maturity", "trade_date",
+        "settlement_date", "coupon", "yield", "price", "trade_amount",
+        "calculation_date", "calculation_price", "index", "index_rate",
+        "spread", "trade_type", "ratings_m_s_f"
+    ]
+
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df["cusip"] = clean_cusip(df["cusip"])
+
+    for col in ["trade_datetime", "maturity", "trade_date", "settlement_date", "calculation_date"]:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
+
+    for col in ["coupon", "yield", "price", "trade_amount", "calculation_price", "index_rate", "spread"]:
+        df[col] = clean_numeric(df[col])
+
+    df["source_file"] = Path(source_file).name if source_file else pd.NA
+    df["source_issuer_guess"] = infer_issuer_from_filename(source_file) if source_file else pd.NA
+
+    df = df[df["cusip"].notna()].copy()
+    df = df[df["trade_date"].notna()].copy()
+
+    return df[required_cols + ["source_file", "source_issuer_guess"]]
+
+
+@st.cache_data(show_spinner=False)
+def load_bonds():
+    bonds_file = find_first_existing(BONDS_FILE_CANDIDATES)
+    if bonds_file is None:
+        return pd.DataFrame(), None
+
+    raw = pd.read_csv(bonds_file, dtype={"Cusip": str, "CUSIP": str, "cusip": str})
+    return standardize_bonds(raw), bonds_file
+
+
+@st.cache_data(show_spinner=False)
+def load_trades():
+    files = []
+    for pattern in TRADE_FILE_PATTERNS:
+        files.extend(glob.glob(pattern))
+
+    seen = set()
+    unique_files = []
+    for f in files:
+        if f not in seen:
+            seen.add(f)
+            unique_files.append(f)
+
+    trade_frames = []
+    failed_files = []
+
+    for f in unique_files:
+        try:
+            raw = read_trade_file(f)
+            trade_frames.append(standardize_trades(raw, source_file=f))
+        except Exception as e:
+            failed_files.append((Path(f).name, str(e)))
+
+    trades = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
+    return trades, unique_files, failed_files
+
+
+@st.cache_data(show_spinner=False)
+def load_issuers_from_csv():
+    if not ISSUER_FILE.exists():
+        return pd.DataFrame(columns=["issuer", "sector", "primary_type", "notes"])
+
+    df = pd.read_csv(ISSUER_FILE)
+    df.columns = [clean_colname(c) for c in df.columns]
+
+    for col in ["issuer", "sector", "primary_type", "notes"]:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    df["issuer"] = df["issuer"].astype(str).str.strip()
+    df["sector"] = df["sector"].astype(str).str.strip().replace({"nan": "Unassigned", "": "Unassigned"})
+    df["primary_type"] = df["primary_type"].astype(str).str.strip().replace({"nan": pd.NA})
+    df["notes"] = df["notes"].astype(str).str.strip().replace({"nan": pd.NA})
+
+    df = df[df["issuer"] != ""].copy()
+    df = df.drop_duplicates(subset=["issuer"], keep="last")
+
+    return df[["issuer", "sector", "primary_type", "notes"]]
+
+
+def build_issuer_master(bonds_df, issuers_csv_df):
+    from_bonds = (
+        bonds_df[["issuer", "sector", "primary_type"]]
+        .drop_duplicates(subset=["issuer"])
+        .copy()
+    )
+
+    from_bonds["sector"] = from_bonds["sector"].fillna("Unassigned")
+    from_bonds["primary_type"] = from_bonds["primary_type"].fillna(pd.NA)
+    from_bonds["notes"] = pd.NA
+
+    combined = pd.concat([from_bonds, issuers_csv_df], ignore_index=True)
+
+    combined["issuer"] = combined["issuer"].astype(str).str.strip()
+    combined["sector"] = combined["sector"].astype(str).str.strip().replace({"nan": "Unassigned", "": "Unassigned"})
+
+    combined = combined[combined["issuer"] != ""]
+    combined = combined.drop_duplicates(subset=["issuer"], keep="last")
+    combined = combined.sort_values(["sector", "issuer"])
+
+    return combined[["issuer", "sector", "primary_type", "notes"]]
+
+
+@st.cache_data(show_spinner=False)
+def load_mmd():
+    mmd_file = find_first_existing(MMD_FILE_CANDIDATES)
+    if mmd_file is None:
+        return pd.DataFrame(), None
+
+    df = pd.read_csv(mmd_file)
+    df.columns = (
+        df.columns.astype(str)
+        .str.strip()
+        .str.replace("-Yr", "Y", regex=False)
+        .str.replace("Yr", "Y", regex=False)
+        .str.replace("-YR", "Y", regex=False)
+        .str.replace("YR", "Y", regex=False)
+        .str.replace("-", "", regex=False)
+    )
+
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+    return df, mmd_file
+
+
+def assign_maturity_bucket(years):
+    if pd.isna(years):
+        return pd.NA
+    if years <= 7:
+        return "Short"
+    if years <= 15:
+        return "10Y"
+    if years <= 25:
+        return "20Y"
+    return "30Y"
+
+
+# ============================================================
+# Reload Button
+# ============================================================
+
+with st.sidebar:
+    st.header("Data Control")
+
+    if st.button("Reload Data"):
+        st.cache_data.clear()
+        st.rerun()
+
+
+# ============================================================
+# Load Data
+# ============================================================
+
+bonds_df, bonds_file = load_bonds()
+trades_df, trade_files, failed_trade_files = load_trades()
+issuers_csv_df = load_issuers_from_csv()
+issuer_master = build_issuer_master(bonds_df, issuers_csv_df)
+mmd_df, mmd_file = load_mmd()
+
+if bonds_df.empty:
+    st.error("No bonds file found. Please add data/Bonds.csv or data/bonds.csv.")
+    st.stop()
+
+# 如果 issuers.csv 不存在，自动创建
+if not ISSUER_FILE.exists():
+    save_issuers(issuer_master)
+    st.cache_data.clear()
+    st.rerun()
+
+# 把 sector 信息 merge 回 bonds
+bonds_df = bonds_df.drop(columns=["sector", "primary_type"], errors="ignore").merge(
+    issuer_master[["issuer", "sector", "primary_type"]],
+    on="issuer",
+    how="left"
+)
+
+bonds_df["sector"] = bonds_df["sector"].fillna("Unassigned")
+
+
+# ============================================================
+# Merge Trades with Bonds
+# ============================================================
+
+if not trades_df.empty:
+    market_df = trades_df.merge(
+        bonds_df,
+        on="cusip",
+        how="left",
+        suffixes=("_trade", "_bond")
+    )
+
+    if "issuer" not in market_df.columns:
+        market_df["issuer"] = market_df["source_issuer_guess"]
+    else:
+        market_df["issuer"] = market_df["issuer"].fillna(market_df["source_issuer_guess"])
+
+    market_df["sector"] = market_df["sector"].fillna("Unassigned")
+
+    market_df["years_to_maturity_at_trade"] = (
+        market_df["maturity_bond"].fillna(market_df["maturity_trade"]) - market_df["trade_date"]
+    ).dt.days / 365.25
+
+    market_df["maturity_bucket"] = market_df["years_to_maturity_at_trade"].apply(assign_maturity_bucket)
+else:
+    market_df = pd.DataFrame()
+
+
+# ============================================================
+# Sidebar: Issuer Tools
+# ============================================================
+
+st.sidebar.markdown("---")
+st.sidebar.header("Issuer Tools")
+
+sector_options = sorted(issuer_master["sector"].dropna().unique().tolist())
+
+selected_sector = st.sidebar.selectbox(
+    "1. Select Sector",
+    sector_options,
+    index=0 if sector_options else None
+)
+
+issuers_in_sector = (
+    issuer_master[issuer_master["sector"] == selected_sector]["issuer"]
+    .dropna()
+    .sort_values()
+    .tolist()
+)
+
+selected_issuer = st.sidebar.selectbox(
+    "2. Select Issuer",
+    issuers_in_sector,
+    index=0 if issuers_in_sector else None
+)
+
+maturity_bucket = st.sidebar.selectbox(
     "Maturity Bucket",
-    ["10Y", "20Y", "30Y"]
+    ["All", "Short", "10Y", "20Y", "30Y"]
 )
 
 time_window = st.sidebar.selectbox(
     "Time Window",
-    ["1Y", "3Y", "5Y"]
+    ["All", "1Y", "3Y", "5Y"]
 )
 
-if selected_sector is not None:
-    filtered_issuers = (
-        issuer_df[issuer_df["Sector"] == selected_sector]["Issuer"]
-        .sort_values()
-        .tolist()
-    )
-else:
-    filtered_issuers = []
+show_raw_tables = st.sidebar.checkbox("Show raw tables", value=False)
 
-issuer = st.sidebar.selectbox(
-    "Select Issuer",
-    filtered_issuers,
-    index=None,
-    placeholder="Search issuer alphabetically..."
-)
 
-# =========================
-# Add New Issuer + Sector
-# =========================
+# ============================================================
+# Add Issuer
+# ============================================================
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("Add New Issuer")
+with st.sidebar.expander("Add New Issuer"):
+    with st.form("add_issuer_form"):
+        new_issuer = st.text_input("Issuer Name")
+        new_sector = st.text_input("Sector")
+        new_primary_type = st.text_input("Primary Type / Optional")
+        new_notes = st.text_area("Notes / Optional")
 
-new_issuer = st.sidebar.text_input(
-    "New issuer name",
-    placeholder="Example: Los Angeles County"
-)
+        submitted = st.form_submit_button("Add Issuer")
 
-new_sector_choice = st.sidebar.selectbox(
-    "Sector for new issuer",
-    sector_list + ["Add new sector manually"],
-    index=None,
-    placeholder="Select sector..."
-)
+        if submitted:
+            if not new_issuer.strip():
+                st.warning("Issuer name cannot be empty.")
+            else:
+                new_row = pd.DataFrame([{
+                    "issuer": new_issuer.strip(),
+                    "sector": new_sector.strip() if new_sector.strip() else "Unassigned",
+                    "primary_type": new_primary_type.strip() if new_primary_type.strip() else pd.NA,
+                    "notes": new_notes.strip() if new_notes.strip() else pd.NA,
+                }])
 
-new_sector_manual = ""
+                updated = pd.concat([issuer_master, new_row], ignore_index=True)
+                save_issuers(updated)
 
-if new_sector_choice == "Add new sector manually":
-    new_sector_manual = st.sidebar.text_input(
-        "New sector name",
-        placeholder="Example: Healthcare"
-    )
+                st.success("Issuer added and saved to issuers.csv.")
+                st.cache_data.clear()
+                st.rerun()
 
-if st.sidebar.button("Add Issuer"):
-    new_issuer_clean = new_issuer.strip()
 
-    if new_sector_choice == "Add new sector manually":
-        new_sector_clean = new_sector_manual.strip()
-    else:
-        new_sector_clean = new_sector_choice
+# ============================================================
+# Correct Issuer
+# ============================================================
 
-    if new_issuer_clean == "":
-        st.sidebar.warning("Please enter a valid issuer name.")
-
-    elif not new_sector_clean:
-        st.sidebar.warning("Please select or enter a sector.")
-
-    elif new_issuer_clean in issuer_df["Issuer"].values:
-        st.sidebar.info("This issuer already exists.")
-
-    else:
-        new_row = pd.DataFrame({
-            "Issuer": [new_issuer_clean],
-            "Sector": [new_sector_clean]
-        })
-
-        issuer_df = pd.concat([issuer_df, new_row], ignore_index=True)
-
-        issuer_df["Issuer"] = issuer_df["Issuer"].astype(str).str.strip()
-        issuer_df["Sector"] = issuer_df["Sector"].astype(str).str.strip()
-        issuer_df = issuer_df[issuer_df["Issuer"] != ""]
-        issuer_df["Sector"] = issuer_df["Sector"].replace("", "Unclassified")
-        issuer_df = issuer_df.drop_duplicates(subset=["Issuer"], keep="first")
-        issuer_df = issuer_df.sort_values(["Sector", "Issuer"])
-
-        issuer_df.to_csv(ISSUER_FILE, index=False)
-
-        st.sidebar.success(f"Added: {new_issuer_clean} → {new_sector_clean}")
-        st.rerun()
-
-# =========================
-# Correct Existing Issuer Sector
-# =========================
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("Correct Issuer Sector")
-
-issuer_to_edit = st.sidebar.selectbox(
-    "Issuer to correct",
-    issuer_df["Issuer"].sort_values().tolist(),
-    index=None,
-    placeholder="Search issuer to edit..."
-)
-
-if issuer_to_edit:
-    current_sector = issuer_df.loc[
-        issuer_df["Issuer"] == issuer_to_edit,
-        "Sector"
-    ].iloc[0]
-
-    st.sidebar.caption(f"Current sector: {current_sector}")
-
-    corrected_sector_choice = st.sidebar.selectbox(
-        "Corrected sector",
-        sector_list + ["Add new sector manually"],
-        index=None,
-        placeholder="Select corrected sector..."
+with st.sidebar.expander("Correct Existing Issuer"):
+    issuer_to_correct = st.selectbox(
+        "Issuer to Correct",
+        sorted(issuer_master["issuer"].dropna().unique().tolist()),
+        key="issuer_to_correct"
     )
 
-    corrected_sector_manual = ""
+    current_row = issuer_master[issuer_master["issuer"] == issuer_to_correct].iloc[0]
 
-    if corrected_sector_choice == "Add new sector manually":
-        corrected_sector_manual = st.sidebar.text_input(
-            "New corrected sector name",
-            placeholder="Example: Public Power"
+    with st.form("correct_issuer_form"):
+        corrected_issuer = st.text_input("Corrected Issuer Name", value=current_row["issuer"])
+        corrected_sector = st.text_input("Corrected Sector", value=current_row["sector"])
+        corrected_primary_type = st.text_input(
+            "Corrected Primary Type",
+            value="" if pd.isna(current_row["primary_type"]) else str(current_row["primary_type"])
+        )
+        corrected_notes = st.text_area(
+            "Notes",
+            value="" if pd.isna(current_row["notes"]) else str(current_row["notes"])
         )
 
-    if st.sidebar.button("Update Sector"):
-        if corrected_sector_choice == "Add new sector manually":
-            corrected_sector = corrected_sector_manual.strip()
-        else:
-            corrected_sector = corrected_sector_choice
+        corrected_submit = st.form_submit_button("Save Correction")
 
-        if not corrected_sector:
-            st.sidebar.warning("Please select or enter a corrected sector.")
+        if corrected_submit:
+            updated = issuer_master.copy()
 
-        else:
-            issuer_df.loc[
-                issuer_df["Issuer"] == issuer_to_edit,
-                "Sector"
-            ] = corrected_sector
+            mask = updated["issuer"] == issuer_to_correct
+            updated.loc[mask, "issuer"] = corrected_issuer.strip()
+            updated.loc[mask, "sector"] = corrected_sector.strip() if corrected_sector.strip() else "Unassigned"
+            updated.loc[mask, "primary_type"] = corrected_primary_type.strip() if corrected_primary_type.strip() else pd.NA
+            updated.loc[mask, "notes"] = corrected_notes.strip() if corrected_notes.strip() else pd.NA
 
-            issuer_df = issuer_df.sort_values(["Sector", "Issuer"])
-            issuer_df.to_csv(ISSUER_FILE, index=False)
+            save_issuers(updated)
 
-            st.sidebar.success(
-                f"Updated: {issuer_to_edit} → {corrected_sector}"
-            )
+            st.success("Correction saved to issuers.csv.")
+            st.cache_data.clear()
             st.rerun()
-# Stop if no issuer selected
-if issuer is None:
-    st.warning("Please select a sector and issuer to continue.")
-    st.stop()
 
-# Main Page
+
+# ============================================================
+# Sidebar File Info
+# ============================================================
+
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Bonds file: {bonds_file.name if bonds_file else 'None'}")
+st.sidebar.caption(f"Issuer file: {ISSUER_FILE.name}")
+st.sidebar.caption(f"Trade files loaded: {len(trade_files)}")
+
+if failed_trade_files:
+    with st.sidebar.expander("Failed trade files"):
+        for name, err in failed_trade_files:
+            st.write(f"{name}: {err}")
+
+
+# ============================================================
+# Filter Data
+# ============================================================
+
+if selected_issuer:
+    issuer_bonds = bonds_df[bonds_df["issuer"] == selected_issuer].copy()
+else:
+    issuer_bonds = pd.DataFrame()
+
+if not market_df.empty and selected_issuer:
+    issuer_trades = market_df[market_df["issuer"] == selected_issuer].copy()
+else:
+    issuer_trades = pd.DataFrame()
+
+if not issuer_trades.empty and maturity_bucket != "All":
+    issuer_trades = issuer_trades[issuer_trades["maturity_bucket"] == maturity_bucket].copy()
+
+if not issuer_trades.empty and time_window != "All":
+    latest_date = issuer_trades["trade_date"].max()
+
+    if time_window == "1Y":
+        start_date = latest_date - pd.DateOffset(years=1)
+    elif time_window == "3Y":
+        start_date = latest_date - pd.DateOffset(years=3)
+    else:
+        start_date = latest_date - pd.DateOffset(years=5)
+
+    issuer_trades = issuer_trades[issuer_trades["trade_date"] >= start_date].copy()
+
+
+# ============================================================
+# Executive Snapshot
+# ============================================================
+
 st.header("Executive Snapshot")
-st.write(f"Selected Issuer: **{issuer}**")
-st.write(f"Maturity Bucket: **{maturity}**")
-st.write(f"Time Window: **{time_window}**")
-st.header("Executive Snapshot")
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Current Spread", "52 bps", "+7 bps")
-col2.metric("AA Peer Avg", "42 bps", "+2 bps")
-col3.metric("Vs AA Peers", "+10 bps")
-col4.metric("Signal", "Cheapening")
 
-st.header("Spread Trend")
+col1, col2, col3, col4, col5 = st.columns(5)
 
-data = pd.DataFrame({
-    "Date": pd.date_range("2025-01-01", periods=12, freq="ME"),
-    "LADWP Spread": [38, 40, 42, 41, 45, 47, 46, 48, 50, 49, 51, 52],
-    "AA Peer Avg": [35, 36, 37, 37, 38, 39, 39, 40, 41, 41, 42, 42],
-    "AAA Benchmark": [20, 21, 22, 22, 23, 24, 23, 24, 25, 25, 26, 26],
-})
+col1.metric("Sector", selected_sector if selected_sector else "None")
+col2.metric("Issuer", selected_issuer if selected_issuer else "None")
+col3.metric("Bonds in Master", f"{len(issuer_bonds):,}")
 
-chart_data = data.melt(
-    id_vars="Date",
-    value_vars=["LADWP Spread", "AA Peer Avg", "AAA Benchmark"],
-    var_name="Series",
-    value_name="Spread"
-)
+if not issuer_trades.empty:
+    col4.metric("Trades Loaded", f"{len(issuer_trades):,}")
+    col5.metric("Latest Trade Date", issuer_trades["trade_date"].max().strftime("%Y-%m-%d"))
+else:
+    col4.metric("Trades Loaded", "0")
+    col5.metric("Liquidity Status", "No trade data")
 
-fig = px.line(chart_data, x="Date", y="Spread", color="Series", markers=True)
-st.plotly_chart(fig, use_container_width=True)
 
-st.header("Relative Value Summary")
+# ============================================================
+# Bond Master Section
+# ============================================================
 
-summary = pd.DataFrame({
-    "Metric": ["Current Spread", "1M Change", "Vs AA Peer Avg", "Historical Percentile", "Liquidity Check"],
-    "Value": ["52 bps", "+7 bps", "+10 bps", "78th percentile", "Moderate"]
-})
+st.header("Bond Master")
 
-st.dataframe(summary, use_container_width=True)
+bond_display_cols = [
+    "issuer", "sector", "primary_type", "election", "series", "cusip",
+    "secondary_credit", "term", "maturity", "par_amount",
+    "outstanding_amount", "coupon", "call_date", "call_price",
+    "fed_tax", "amt"
+]
 
-st.header("Signal Box")
-st.info("LADWP is trading wider than AA peers, suggesting mild cheapening relative to comparable issuers.")
+bond_display_cols = [c for c in bond_display_cols if c in issuer_bonds.columns]
+
+if issuer_bonds.empty:
+    st.info("No bonds found for this issuer.")
+else:
+    st.dataframe(
+        issuer_bonds[bond_display_cols].sort_values(["maturity", "cusip"]),
+        use_container_width=True
+    )
+
+
+# ============================================================
+# Trade History Section
+# ============================================================
+
+st.header("Trade History")
+
+if issuer_trades.empty:
+    st.warning(
+        "No trade rows found for this issuer and filter. "
+        "This is normal in muni data. The bond master can still be used for security selection and peer analysis."
+    )
+else:
+    trade_display_cols = [
+        "trade_datetime", "cusip", "description", "maturity_trade",
+        "maturity_bond", "maturity_bucket", "coupon_trade", "yield",
+        "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"
+    ]
+
+    trade_display_cols = [c for c in trade_display_cols if c in issuer_trades.columns]
+
+    st.dataframe(
+        issuer_trades[trade_display_cols].sort_values("trade_datetime", ascending=False),
+        use_container_width=True
+    )
+
+    st.subheader("Yield Trend")
+
+    fig = px.scatter(
+        issuer_trades.sort_values("trade_date"),
+        x="trade_date",
+        y="yield",
+        color="cusip",
+        size="trade_amount",
+        hover_data=["price", "trade_amount", "trade_type", "maturity_bucket"],
+        title=f"{selected_issuer} Trade Yields"
+    )
+
+    fig.update_layout(
+        xaxis_title="Trade Date",
+        yaxis_title="Yield (%)",
+        legend_title="CUSIP"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Liquidity Summary by CUSIP")
+
+    liq = (
+        issuer_trades
+        .groupby("cusip", dropna=False)
+        .agg(
+            trade_count=("trade_date", "count"),
+            latest_trade=("trade_date", "max"),
+            avg_yield=("yield", "mean"),
+            avg_price=("price", "mean"),
+            total_trade_amount=("trade_amount", "sum"),
+            maturity=("maturity_bond", "first"),
+            coupon=("coupon_bond", "first"),
+            outstanding_amount=("outstanding_amount", "first"),
+        )
+        .reset_index()
+        .sort_values(["trade_count", "total_trade_amount"], ascending=False)
+    )
+
+    st.dataframe(liq, use_container_width=True)
+
+
+# ============================================================
+# Raw Tables
+# ============================================================
+
+if show_raw_tables:
+    st.header("Raw Loaded Data")
+
+    st.subheader("Issuer Master")
+    st.dataframe(issuer_master, use_container_width=True)
+
+    st.subheader("All Bonds")
+    st.dataframe(bonds_df, use_container_width=True)
+
+    st.subheader("All Trades")
+    if market_df.empty:
+        st.info("No trade files loaded.")
+    else:
+        st.dataframe(market_df, use_container_width=True)
+
+    st.subheader("MMD")
+    if mmd_df.empty:
+        st.info("No MMD file loaded.")
+    else:
+        st.dataframe(mmd_df, use_container_width=True)
