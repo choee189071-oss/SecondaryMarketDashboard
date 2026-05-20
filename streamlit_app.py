@@ -728,6 +728,8 @@ else:
             (chart_df["trade_date"].dt.date >= start_date) &
             (chart_df["trade_date"].dt.date <= end_date)
         ].copy()
+    else:
+        start_date, end_date = date_min, date_max
 
     if chart_df.empty:
         st.warning("No trade data found for the selected comparison filters.")
@@ -760,11 +762,10 @@ else:
             if date_col in mmd_plot.columns:
                 mmd_plot[date_col] = pd.to_datetime(mmd_plot[date_col], errors="coerce")
 
-                if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
-                    mmd_plot = mmd_plot[
-                        (mmd_plot[date_col].dt.date >= start_date) &
-                        (mmd_plot[date_col].dt.date <= end_date)
-                    ]
+                mmd_plot = mmd_plot[
+                    (mmd_plot[date_col].dt.date >= start_date) &
+                    (mmd_plot[date_col].dt.date <= end_date)
+                ].copy()
 
                 mmd_bucket_map = {
                     "Short": "5Y",
@@ -796,218 +797,323 @@ else:
 
         st.plotly_chart(fig, use_container_width=True)
 
-  # ============================================================
+
+# ============================================================
 # Liquidity / Trading Frequency Analysis
 # ============================================================
 
-st.subheader("Liquidity / Trading Frequency Analysis by CUSIP")
+st.header("Liquidity Analysis")
 
-today = pd.Timestamp.today().normalize()
+if issuer_trades.empty:
+    st.info("No issuer trade data available for liquidity analysis.")
+else:
+    st.subheader("Liquidity / Trading Frequency Analysis by CUSIP")
 
-liq_base = issuer_trades.copy()
-liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
+    today = pd.Timestamp.today().normalize()
 
-liq = (
-    liq_base
-    .groupby("cusip", dropna=False)
-    .agg(
-        trade_count=("trade_date", "count"),
-        first_trade=("trade_date", "min"),
-        latest_trade=("trade_date", "max"),
-        active_months=("trade_month", "nunique"),
-        avg_yield=("yield", "mean"),
-        min_yield=("yield", "min"),
-        max_yield=("yield", "max"),
-        avg_price=("price", "mean"),
-        total_trade_amount=("trade_amount", "sum"),
-        avg_trade_amount=("trade_amount", "mean"),
-        maturity=("maturity_bond", "first"),
-        coupon=("coupon_bond", "first"),
-        outstanding_amount=("outstanding_amount", "first"),
-    )
-    .reset_index()
-)
+    liq_base = issuer_trades.copy()
+    liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
 
-liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
-liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
-liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
-liq["avg_trades_per_month"] = liq["trade_count"] / liq["active_months"].clip(lower=1)
-
-recent_cutoff = today - pd.DateOffset(days=90)
-
-recent_activity = (
-    liq_base[liq_base["trade_date"] >= recent_cutoff]
-    .groupby("cusip")
-    .agg(recent_90d_trades=("trade_date", "count"))
-    .reset_index()
-)
-
-liq = liq.merge(recent_activity, on="cusip", how="left")
-liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
-
-liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
-liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"]
-
-liq["liquidity_score"] = (
-    liq["trade_count"].rank(pct=True) * 35
-    + liq["total_trade_amount"].rank(pct=True) * 25
-    + liq["recent_90d_trades"].rank(pct=True) * 25
-    + (1 - liq["days_since_last_trade"].rank(pct=True)) * 15
-)
-
-def liquidity_tier(score, days_since_last_trade):
-    if pd.isna(score):
-        return "Unknown"
-    if days_since_last_trade > 365:
-        return "Stale"
-    if score >= 75:
-        return "High Liquidity"
-    if score >= 45:
-        return "Medium Liquidity"
-    return "Low Liquidity"
-
-liq["liquidity_tier"] = liq.apply(
-    lambda row: liquidity_tier(row["liquidity_score"], row["days_since_last_trade"]),
-    axis=1
-)
-
-liq = liq.sort_values(
-    ["liquidity_score", "trade_count", "total_trade_amount"],
-    ascending=False
-)
-
-st.dataframe(liq, use_container_width=True)
-
-# ============================================================
-# Liquidity Visualizations
-# ============================================================
-
-if not liq.empty:
-
-    # --------------------------------------------------------
-    # Trading Frequency
-    # --------------------------------------------------------
-
-    st.subheader("Trading Frequency by CUSIP")
-
-    freq_fig = px.bar(
-        liq.sort_values("trade_count", ascending=False).head(25),
-        x="cusip",
-        y="trade_count",
-        color="liquidity_tier",
-        hover_data=[
-            "recent_90d_trades",
-            "avg_trades_per_month",
-            "avg_days_between_trades",
-            "days_since_last_trade",
-            "total_trade_amount",
-            "avg_trade_amount",
-            "avg_yield",
-            "maturity"
-        ],
-        title="Top 25 Most Frequently Traded CUSIPs"
+    liq = (
+        liq_base
+        .groupby("cusip", dropna=False)
+        .agg(
+            trade_count=("trade_date", "count"),
+            first_trade=("trade_date", "min"),
+            latest_trade=("trade_date", "max"),
+            active_months=("trade_month", "nunique"),
+            avg_yield=("yield", "mean"),
+            min_yield=("yield", "min"),
+            max_yield=("yield", "max"),
+            avg_price=("price", "mean"),
+            total_trade_amount=("trade_amount", "sum"),
+            avg_trade_amount=("trade_amount", "mean"),
+            median_trade_amount=("trade_amount", "median"),
+            maturity=("maturity_bond", "first"),
+            coupon=("coupon_bond", "first"),
+            outstanding_amount=("outstanding_amount", "first"),
+        )
+        .reset_index()
     )
 
-    freq_fig.update_layout(
-        xaxis_title="CUSIP",
-        yaxis_title="Trade Count",
-        legend_title="Liquidity Tier",
-        xaxis_tickangle=-45
+    liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
+    liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
+    liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
+    liq["avg_trades_per_month"] = liq["trade_count"] / liq["active_months"].clip(lower=1)
+
+    recent_cutoff = today - pd.DateOffset(days=90)
+
+    recent_activity = (
+        liq_base[liq_base["trade_date"] >= recent_cutoff]
+        .groupby("cusip")
+        .agg(recent_90d_trades=("trade_date", "count"))
+        .reset_index()
     )
 
-    st.plotly_chart(freq_fig, use_container_width=True)
+    liq = liq.merge(recent_activity, on="cusip", how="left")
+    liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
 
-
-    # --------------------------------------------------------
-    # Liquidity Map
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-# Liquidity Ranking Table
-# --------------------------------------------------------
-
-st.subheader("Liquidity Ranking")
-
-liq_rank = liq.copy()
-
-liq_rank = liq_rank.sort_values(
-    ["liquidity_score", "trade_count"],
-    ascending=False
-)
-
-display_cols = [
-    "cusip",
-    "liquidity_tier",
-    "liquidity_score",
-    "trade_count",
-    "recent_90d_trades",
-    "days_since_last_trade",
-    "avg_days_between_trades",
-    "avg_trade_amount",
-    "total_trade_amount",
-    "turnover_ratio",
-    "avg_yield",
-    "yield_range",
-    "maturity"
-]
-
-display_cols = [c for c in display_cols if c in liq_rank.columns]
-
-st.dataframe(
-    liq_rank[display_cols],
-    use_container_width=True,
-    height=500
-)
-
-    # --------------------------------------------------------
-    # Trade Recency Histogram
-    # --------------------------------------------------------
-
-    st.subheader("Trade Recency Distribution")
-
-    recency_fig = px.histogram(
-        liq,
-        x="days_since_last_trade",
-        nbins=30,
-        color="liquidity_tier",
-        title="Distribution of Days Since Last Trade"
+    liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
+    liq["turnover_ratio"] = (
+        liq["total_trade_amount"] /
+        liq["outstanding_amount"].replace({0: pd.NA})
     )
 
-    recency_fig.update_layout(
-        xaxis_title="Days Since Last Trade",
-        yaxis_title="Number of CUSIPs"
+    liq["liquidity_score"] = (
+        liq["trade_count"].rank(pct=True) * 35
+        + liq["total_trade_amount"].rank(pct=True) * 25
+        + liq["recent_90d_trades"].rank(pct=True) * 25
+        + (1 - liq["days_since_last_trade"].rank(pct=True)) * 15
     )
 
-    st.plotly_chart(recency_fig, use_container_width=True)
+    def liquidity_tier(score, days_since_last_trade):
+        if pd.isna(score):
+            return "Unknown"
+        if days_since_last_trade > 365:
+            return "Stale"
+        if score >= 75:
+            return "High Liquidity"
+        if score >= 45:
+            return "Medium Liquidity"
+        return "Low Liquidity"
+
+    liq["liquidity_tier"] = liq.apply(
+        lambda row: liquidity_tier(row["liquidity_score"], row["days_since_last_trade"]),
+        axis=1
+    )
+
+    liq = liq.sort_values(
+        ["liquidity_score", "trade_count", "total_trade_amount"],
+        ascending=False
+    )
+
+    summary_cols = [
+        "cusip",
+        "liquidity_tier",
+        "liquidity_score",
+        "trade_count",
+        "recent_90d_trades",
+        "active_months",
+        "avg_trades_per_month",
+        "avg_days_between_trades",
+        "days_since_last_trade",
+        "first_trade",
+        "latest_trade",
+        "avg_yield",
+        "yield_range",
+        "avg_price",
+        "total_trade_amount",
+        "avg_trade_amount",
+        "median_trade_amount",
+        "turnover_ratio",
+        "maturity",
+        "coupon",
+        "outstanding_amount",
+    ]
+
+    summary_cols = [c for c in summary_cols if c in liq.columns]
+
+    st.dataframe(
+        liq[summary_cols],
+        use_container_width=True,
+        height=500
+    )
 
 
-    # --------------------------------------------------------
-    # Yield Stability
-    # --------------------------------------------------------
+    # ============================================================
+    # Liquidity Visualizations
+    # ============================================================
 
-    st.subheader("Yield Stability vs Liquidity")
+    if not liq.empty:
 
-    stability_fig = px.scatter(
-        liq,
-        x="yield_range",
-        y="trade_count",
-        size="total_trade_amount",
-        color="liquidity_tier",
-        hover_data=[
+        # --------------------------------------------------------
+        # Trading Frequency
+        # --------------------------------------------------------
+
+        st.subheader("Trading Frequency by CUSIP")
+
+        freq_fig = px.bar(
+            liq.sort_values("trade_count", ascending=False).head(25),
+            x="cusip",
+            y="trade_count",
+            color="liquidity_tier",
+            hover_data=[
+                "recent_90d_trades",
+                "avg_trades_per_month",
+                "avg_days_between_trades",
+                "days_since_last_trade",
+                "total_trade_amount",
+                "avg_trade_amount",
+                "avg_yield",
+                "maturity"
+            ],
+            title="Top 25 Most Frequently Traded CUSIPs"
+        )
+
+        freq_fig.update_layout(
+            xaxis_title="CUSIP",
+            yaxis_title="Trade Count",
+            legend_title="Liquidity Tier",
+            xaxis_tickangle=-45
+        )
+
+        st.plotly_chart(freq_fig, use_container_width=True)
+
+
+        # --------------------------------------------------------
+        # Liquidity Ranking
+        # --------------------------------------------------------
+
+        st.subheader("Liquidity Ranking")
+
+        liq_rank = liq.sort_values(
+            ["liquidity_score", "trade_count"],
+            ascending=False
+        ).copy()
+
+        ranking_cols = [
             "cusip",
-            "avg_yield",
+            "liquidity_tier",
+            "liquidity_score",
+            "trade_count",
+            "recent_90d_trades",
             "days_since_last_trade",
-            "avg_trade_amount"
-        ],
-        title="Yield Volatility vs Trading Frequency"
-    )
+            "avg_days_between_trades",
+            "avg_trade_amount",
+            "total_trade_amount",
+            "turnover_ratio",
+            "avg_yield",
+            "yield_range",
+            "maturity"
+        ]
 
-    stability_fig.update_layout(
-        xaxis_title="Yield Range",
-        yaxis_title="Trade Count"
-    )
+        ranking_cols = [c for c in ranking_cols if c in liq_rank.columns]
 
-    st.plotly_chart(stability_fig, use_container_width=True)
+        st.dataframe(
+            liq_rank[ranking_cols],
+            use_container_width=True,
+            height=500
+        )
+
+
+        # --------------------------------------------------------
+        # Trade Recency Distribution
+        # --------------------------------------------------------
+
+        st.subheader("Trade Recency Distribution")
+
+        recency_fig = px.histogram(
+            liq,
+            x="days_since_last_trade",
+            color="liquidity_tier",
+            nbins=30,
+            barmode="overlay",
+            title="Distribution of Days Since Last Trade"
+        )
+
+        recency_fig.update_layout(
+            xaxis_title="Days Since Last Trade",
+            yaxis_title="Number of CUSIPs",
+            legend_title="Liquidity Tier"
+        )
+
+        st.plotly_chart(recency_fig, use_container_width=True)
+
+
+        # --------------------------------------------------------
+        # Yield Range Distribution
+        # --------------------------------------------------------
+
+        st.subheader("Yield Range Distribution")
+
+        yield_hist = px.histogram(
+            liq,
+            x="yield_range",
+            color="liquidity_tier",
+            nbins=25,
+            barmode="overlay",
+            title="Distribution of Yield Range by Liquidity Tier"
+        )
+
+        yield_hist.update_layout(
+            xaxis_title="Yield Range",
+            yaxis_title="Number of CUSIPs",
+            legend_title="Liquidity Tier"
+        )
+
+        st.plotly_chart(yield_hist, use_container_width=True)
+
+
+        # --------------------------------------------------------
+        # Monthly Trading Activity
+        # --------------------------------------------------------
+
+        st.subheader("Monthly Trading Activity")
+
+        monthly_activity = (
+            liq_base
+            .groupby("trade_month", as_index=False)
+            .agg(
+                trade_count=("trade_date", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+                avg_yield=("yield", "mean")
+            )
+            .sort_values("trade_month")
+        )
+
+        monthly_activity["trade_month_date"] = pd.to_datetime(
+            monthly_activity["trade_month"] + "-01",
+            errors="coerce"
+        )
+
+        monthly_fig = px.line(
+            monthly_activity,
+            x="trade_month_date",
+            y="trade_count",
+            markers=True,
+            hover_data=["total_trade_amount", "avg_yield"],
+            title="Monthly Trade Count"
+        )
+
+        monthly_fig.update_layout(
+            xaxis_title="Trade Month",
+            yaxis_title="Trade Count"
+        )
+
+        st.plotly_chart(monthly_fig, use_container_width=True)
+
+
+        # --------------------------------------------------------
+        # Total Volume by Liquidity Tier
+        # --------------------------------------------------------
+
+        st.subheader("Total Volume by Liquidity Tier")
+
+        tier_volume = (
+            liq
+            .groupby("liquidity_tier", as_index=False)
+            .agg(
+                total_trade_amount=("total_trade_amount", "sum"),
+                cusip_count=("cusip", "count"),
+                avg_trade_count=("trade_count", "mean")
+            )
+            .sort_values("total_trade_amount", ascending=False)
+        )
+
+        tier_fig = px.bar(
+            tier_volume,
+            x="liquidity_tier",
+            y="total_trade_amount",
+            hover_data=["cusip_count", "avg_trade_count"],
+            title="Total Trade Amount by Liquidity Tier"
+        )
+
+        tier_fig.update_layout(
+            xaxis_title="Liquidity Tier",
+            yaxis_title="Total Trade Amount"
+        )
+
+        st.plotly_chart(tier_fig, use_container_width=True)
 
 
 # ============================================================
