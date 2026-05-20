@@ -922,35 +922,42 @@ if not liq.empty:
     # Liquidity Map
     # --------------------------------------------------------
 
-    st.subheader("Recent Activity vs Total Volume")
+    # --------------------------------------------------------
+# Liquidity Ranking Table
+# --------------------------------------------------------
 
-    volume_fig = px.scatter(
-        liq,
-        x="days_since_last_trade",
-        y="total_trade_amount",
-        size="trade_count",
-        color="liquidity_tier",
-        hover_data=[
-            "cusip",
-            "recent_90d_trades",
-            "avg_days_between_trades",
-            "avg_yield",
-            "yield_range",
-            "avg_trade_amount",
-            "turnover_ratio",
-            "maturity"
-        ],
-        title="Liquidity Map: Recency vs Trading Volume"
-    )
+st.subheader("Liquidity Ranking")
 
-    volume_fig.update_layout(
-        xaxis_title="Days Since Last Trade",
-        yaxis_title="Total Trade Amount",
-        legend_title="Liquidity Tier"
-    )
+liq_rank = liq.copy()
 
-    st.plotly_chart(volume_fig, use_container_width=True)
+liq_rank = liq_rank.sort_values(
+    ["liquidity_score", "trade_count"],
+    ascending=False
+)
 
+display_cols = [
+    "cusip",
+    "liquidity_tier",
+    "liquidity_score",
+    "trade_count",
+    "recent_90d_trades",
+    "days_since_last_trade",
+    "avg_days_between_trades",
+    "avg_trade_amount",
+    "total_trade_amount",
+    "turnover_ratio",
+    "avg_yield",
+    "yield_range",
+    "maturity"
+]
+
+display_cols = [c for c in display_cols if c in liq_rank.columns]
+
+st.dataframe(
+    liq_rank[display_cols],
+    use_container_width=True,
+    height=500
+)
 
     # --------------------------------------------------------
     # Trade Recency Histogram
