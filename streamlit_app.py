@@ -636,54 +636,71 @@ st.header("Yield Trend / Relative Value Comparison")
 
 if market_df.empty:
     st.info("No trade data available for yield comparison.")
+
 else:
+
     issuer_options = sorted(
-    market_df["issuer"].dropna().unique().tolist()
-)
+        market_df["issuer"].dropna().unique().tolist()
+    )
 
-default_issuers = []
+    default_issuers = []
 
-if selected_issuer and selected_issuer in issuer_options:
-    default_issuers = [selected_issuer]
+    if selected_issuer and selected_issuer in issuer_options:
+        default_issuers = [selected_issuer]
 
-compare_issuers = st.multiselect(
-    "Compare Issuers",
-    options=issuer_options,
-    default=default_issuers
-)
+    compare_issuers = st.multiselect(
+        "Compare Issuers",
+        options=issuer_options,
+        default=default_issuers
+    )
+
     compare_bucket = st.selectbox(
         "Comparison Maturity Bucket",
-        ["All", "Short", "10Y", "20Y", "30Y"],
-        index=0
+        ["All", "Short", "10Y", "20Y", "30Y"]
     )
 
     date_min = market_df["trade_date"].min().date()
     date_max = market_df["trade_date"].max().date()
 
     selected_dates = st.date_input(
-        "Select Trade Date Range",
+        "Trade Date Range",
         value=(date_min, date_max),
         min_value=date_min,
         max_value=date_max
     )
 
-    show_mmd = st.checkbox("Compare with MMD", value=True)
+    show_mmd = st.checkbox(
+        "Compare with MMD",
+        value=True
+    )
 
-    chart_df = market_df[market_df["issuer"].isin(compare_issuers)].copy()
+    chart_df = market_df[
+        market_df["issuer"].isin(compare_issuers)
+    ].copy()
 
     if compare_bucket != "All":
-        chart_df = chart_df[chart_df["maturity_bucket"] == compare_bucket].copy()
+        chart_df = chart_df[
+            chart_df["maturity_bucket"] == compare_bucket
+        ].copy()
 
     if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+
         start_date, end_date = selected_dates
+
         chart_df = chart_df[
-            (chart_df["trade_date"].dt.date >= start_date) &
+            (chart_df["trade_date"].dt.date >= start_date)
+            &
             (chart_df["trade_date"].dt.date <= end_date)
         ].copy()
 
     if chart_df.empty:
-        st.warning("No trade data found for the selected comparison filters.")
+
+        st.warning(
+            "No trade data found for selected filters."
+        )
+
     else:
+
         issuer_yield_daily = (
             chart_df
             .groupby(["trade_date", "issuer"], as_index=False)
@@ -700,20 +717,35 @@ compare_issuers = st.multiselect(
             y="avg_yield",
             color="issuer",
             markers=True,
-            hover_data=["trade_count", "total_trade_amount"],
+            hover_data=[
+                "trade_count",
+                "total_trade_amount"
+            ],
             title="Average Trade Yield by Issuer"
         )
 
         if show_mmd and not mmd_df.empty:
+
             mmd_plot = mmd_df.copy()
-            date_col = "Date" if "Date" in mmd_plot.columns else "date"
+
+            date_col = (
+                "Date"
+                if "Date" in mmd_plot.columns
+                else "date"
+            )
 
             if date_col in mmd_plot.columns:
-                mmd_plot[date_col] = pd.to_datetime(mmd_plot[date_col], errors="coerce")
 
-                if isinstance(selected_dates, tuple) and len(selected_dates) == 2:
+                mmd_plot[date_col] = pd.to_datetime(
+                    mmd_plot[date_col],
+                    errors="coerce"
+                )
+
+                if isinstance(selected_dates, tuple):
+
                     mmd_plot = mmd_plot[
-                        (mmd_plot[date_col].dt.date >= start_date) &
+                        (mmd_plot[date_col].dt.date >= start_date)
+                        &
                         (mmd_plot[date_col].dt.date <= end_date)
                     ]
 
@@ -725,9 +757,13 @@ compare_issuers = st.multiselect(
                     "All": "10Y"
                 }
 
-                mmd_col = mmd_bucket_map.get(compare_bucket, "10Y")
+                mmd_col = mmd_bucket_map.get(
+                    compare_bucket,
+                    "10Y"
+                )
 
                 if mmd_col in mmd_plot.columns:
+
                     fig.add_scatter(
                         x=mmd_plot[date_col],
                         y=mmd_plot[mmd_col],
@@ -735,8 +771,6 @@ compare_issuers = st.multiselect(
                         name=f"MMD {mmd_col}",
                         line=dict(dash="dash")
                     )
-                else:
-                    st.info(f"MMD column '{mmd_col}' not found in mmd.csv.")
 
         fig.update_layout(
             xaxis_title="Trade Date",
@@ -745,8 +779,10 @@ compare_issuers = st.multiselect(
             hovermode="x unified"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
-
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
 # ============================================================
 # Liquidity / Trading Frequency Analysis
