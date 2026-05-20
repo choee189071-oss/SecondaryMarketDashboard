@@ -99,12 +99,6 @@ def clean_cusip(s):
     )
 
 
-def normalize_text(s):
-    if pd.isna(s):
-        return pd.NA
-    return str(s).strip()
-
-
 def save_issuers(issuers_df):
     issuers_df = issuers_df.copy()
 
@@ -366,6 +360,8 @@ def load_mmd():
 
     if "Date" in df.columns:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    elif "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
     return df, mmd_file
 
@@ -401,20 +397,19 @@ with st.sidebar:
 bonds_df, bonds_file = load_bonds()
 trades_df, trade_files, failed_trade_files = load_trades()
 issuers_csv_df = load_issuers_from_csv()
-issuer_master = build_issuer_master(bonds_df, issuers_csv_df)
 mmd_df, mmd_file = load_mmd()
 
 if bonds_df.empty:
     st.error("No bonds file found. Please add data/Bonds.csv or data/bonds.csv.")
     st.stop()
 
-# 如果 issuers.csv 不存在，自动创建
+issuer_master = build_issuer_master(bonds_df, issuers_csv_df)
+
 if not ISSUER_FILE.exists():
     save_issuers(issuer_master)
     st.cache_data.clear()
     st.rerun()
 
-# 把 sector 信息 merge 回 bonds
 bonds_df = bonds_df.drop(columns=["sector", "primary_type"], errors="ignore").merge(
     issuer_master[["issuer", "sector", "primary_type"]],
     on="issuer",
@@ -453,7 +448,7 @@ else:
 
 
 # ============================================================
-# Sidebar: Issuer Tools
+# Sidebar: Issuer Tools and Filters
 # ============================================================
 
 st.sidebar.markdown("---")
@@ -633,62 +628,11 @@ else:
     col5.metric("Liquidity Status", "No trade data")
 
 
-
-
-# ============================================================
-# Bond Master Section
-# ============================================================
-
-st.header("Bond Master / Security Reference")
-
-bond_display_cols = [
-    "issuer", "sector", "primary_type", "election", "series", "cusip",
-    "secondary_credit", "term", "maturity", "par_amount",
-    "outstanding_amount", "coupon", "call_date", "call_price",
-    "fed_tax", "amt"
-]
-
-bond_display_cols = [c for c in bond_display_cols if c in issuer_bonds.columns]
-
-if issuer_bonds.empty:
-    st.info("No bonds found for this issuer.")
-else:
-    st.dataframe(
-        issuer_bonds[bond_display_cols].sort_values(["maturity", "cusip"]),
-        use_container_width=True
-    )
-
-
-# ============================================================
-# Trade History Section
-# ============================================================
-
-st.header("Underlying Trade Detail")
-
-if issuer_trades.empty:
-    st.warning(
-        "No trade rows found for this issuer and filter. "
-        "This is normal in muni data. The bond master can still be used for security selection and peer analysis."
-    )
-else:
-    trade_display_cols = [
-        "trade_datetime", "cusip", "description", "maturity_trade",
-        "maturity_bond", "maturity_bucket", "coupon_trade", "yield",
-        "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"
-    ]
-
-    trade_display_cols = [c for c in trade_display_cols if c in issuer_trades.columns]
-
-    st.dataframe(
-        issuer_trades[trade_display_cols].sort_values("trade_datetime", ascending=False),
-        use_container_width=True
-    )
-
 # ============================================================
 # Yield Trend Comparison
 # ============================================================
 
-st.subheader("Yield Trend / Relative Value Comparison")
+st.header("Yield Trend / Relative Value Comparison")
 
 if market_df.empty:
     st.info("No trade data available for yield comparison.")
@@ -717,9 +661,7 @@ else:
 
     show_mmd = st.checkbox("Compare with MMD", value=True)
 
-    chart_df = market_df[
-        market_df["issuer"].isin(compare_issuers)
-    ].copy()
+    chart_df = market_df[market_df["issuer"].isin(compare_issuers)].copy()
 
     if compare_bucket != "All":
         chart_df = chart_df[chart_df["maturity_bucket"] == compare_bucket].copy()
@@ -754,11 +696,10 @@ else:
             title="Average Trade Yield by Issuer"
         )
 
-        # Optional MMD comparison
         if show_mmd and not mmd_df.empty:
             mmd_plot = mmd_df.copy()
-
             date_col = "Date" if "Date" in mmd_plot.columns else "date"
+
             if date_col in mmd_plot.columns:
                 mmd_plot[date_col] = pd.to_datetime(mmd_plot[date_col], errors="coerce")
 
@@ -798,99 +739,132 @@ else:
 
         st.plotly_chart(fig, use_container_width=True)
 
-  # ============================================================
+
+# ============================================================
 # Liquidity / Trading Frequency Analysis
 # ============================================================
 
-st.subheader("Liquidity / Trading Frequency Analysis by CUSIP")
+st.header("Liquidity / Trading Frequency Analysis")
 
-today = pd.Timestamp.today().normalize()
-
-liq_base = issuer_trades.copy()
-liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
-
-liq = (
-    liq_base
-    .groupby("cusip", dropna=False)
-    .agg(
-        trade_count=("trade_date", "count"),
-        first_trade=("trade_date", "min"),
-        latest_trade=("trade_date", "max"),
-        active_months=("trade_month", "nunique"),
-        avg_yield=("yield", "mean"),
-        min_yield=("yield", "min"),
-        max_yield=("yield", "max"),
-        avg_price=("price", "mean"),
-        total_trade_amount=("trade_amount", "sum"),
-        avg_trade_amount=("trade_amount", "mean"),
-        maturity=("maturity_bond", "first"),
-        coupon=("coupon_bond", "first"),
-        outstanding_amount=("outstanding_amount", "first"),
+if issuer_trades.empty:
+    st.warning(
+        "No trade rows found for this issuer and filter. "
+        "Bond Master and raw trade sections are still available below."
     )
-    .reset_index()
-)
+    liq = pd.DataFrame()
+else:
+    today = pd.Timestamp.today().normalize()
 
-liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
-liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
-liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
-liq["avg_trades_per_month"] = liq["trade_count"] / liq["active_months"].clip(lower=1)
+    liq_base = issuer_trades.copy()
+    liq_base["trade_month"] = liq_base["trade_date"].dt.to_period("M").astype(str)
 
-recent_cutoff = today - pd.DateOffset(days=90)
+    liq = (
+        liq_base
+        .groupby("cusip", dropna=False)
+        .agg(
+            trade_count=("trade_date", "count"),
+            first_trade=("trade_date", "min"),
+            latest_trade=("trade_date", "max"),
+            active_months=("trade_month", "nunique"),
+            avg_yield=("yield", "mean"),
+            min_yield=("yield", "min"),
+            max_yield=("yield", "max"),
+            avg_price=("price", "mean"),
+            total_trade_amount=("trade_amount", "sum"),
+            avg_trade_amount=("trade_amount", "mean"),
+            median_trade_amount=("trade_amount", "median"),
+            maturity=("maturity_bond", "first"),
+            coupon=("coupon_bond", "first"),
+            outstanding_amount=("outstanding_amount", "first"),
+        )
+        .reset_index()
+    )
 
-recent_activity = (
-    liq_base[liq_base["trade_date"] >= recent_cutoff]
-    .groupby("cusip")
-    .agg(recent_90d_trades=("trade_date", "count"))
-    .reset_index()
-)
+    liq["days_since_last_trade"] = (today - liq["latest_trade"]).dt.days
+    liq["trading_period_days"] = (liq["latest_trade"] - liq["first_trade"]).dt.days.clip(lower=1)
+    liq["avg_days_between_trades"] = liq["trading_period_days"] / liq["trade_count"].clip(lower=1)
+    liq["avg_trades_per_month"] = liq["trade_count"] / liq["active_months"].clip(lower=1)
 
-liq = liq.merge(recent_activity, on="cusip", how="left")
-liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
+    recent_cutoff = today - pd.DateOffset(days=90)
 
-liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
-liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"]
+    recent_activity = (
+        liq_base[liq_base["trade_date"] >= recent_cutoff]
+        .groupby("cusip")
+        .agg(recent_90d_trades=("trade_date", "count"))
+        .reset_index()
+    )
 
-liq["liquidity_score"] = (
-    liq["trade_count"].rank(pct=True) * 35
-    + liq["total_trade_amount"].rank(pct=True) * 25
-    + liq["recent_90d_trades"].rank(pct=True) * 25
-    + (1 - liq["days_since_last_trade"].rank(pct=True)) * 15
-)
+    liq = liq.merge(recent_activity, on="cusip", how="left")
+    liq["recent_90d_trades"] = liq["recent_90d_trades"].fillna(0).astype(int)
 
-def liquidity_tier(score, days_since_last_trade):
-    if pd.isna(score):
-        return "Unknown"
-    if days_since_last_trade > 365:
-        return "Stale"
-    if score >= 75:
-        return "High Liquidity"
-    if score >= 45:
-        return "Medium Liquidity"
-    return "Low Liquidity"
+    liq["yield_range"] = liq["max_yield"] - liq["min_yield"]
+    liq["turnover_ratio"] = liq["total_trade_amount"] / liq["outstanding_amount"]
 
-liq["liquidity_tier"] = liq.apply(
-    lambda row: liquidity_tier(row["liquidity_score"], row["days_since_last_trade"]),
-    axis=1
-)
+    liq["liquidity_score"] = (
+        liq["trade_count"].rank(pct=True) * 35
+        + liq["total_trade_amount"].rank(pct=True) * 25
+        + liq["recent_90d_trades"].rank(pct=True) * 25
+        + (1 - liq["days_since_last_trade"].rank(pct=True)) * 15
+    )
 
-liq = liq.sort_values(
-    ["liquidity_score", "trade_count", "total_trade_amount"],
-    ascending=False
-)
+    def liquidity_tier(score, days_since_last_trade):
+        if pd.isna(score):
+            return "Unknown"
+        if days_since_last_trade > 365:
+            return "Stale"
+        if score >= 75:
+            return "High Liquidity"
+        if score >= 45:
+            return "Medium Liquidity"
+        return "Low Liquidity"
 
-st.dataframe(liq, use_container_width=True)
+    liq["liquidity_tier"] = liq.apply(
+        lambda row: liquidity_tier(row["liquidity_score"], row["days_since_last_trade"]),
+        axis=1
+    )
 
-# ============================================================
-# Liquidity Visualizations
-# ============================================================
+    liq = liq.sort_values(
+        ["liquidity_score", "trade_count", "total_trade_amount"],
+        ascending=False
+    )
 
-if not liq.empty:
+    # --------------------------------------------------------
+    # Market Activity Over Time
+    # --------------------------------------------------------
+
+    st.subheader("1. Market Activity Over Time")
+
+    monthly_activity = (
+        liq_base
+        .groupby("trade_month", as_index=False)
+        .agg(
+            trade_count=("trade_date", "count"),
+            total_trade_amount=("trade_amount", "sum"),
+            avg_yield=("yield", "mean")
+        )
+    )
+
+    activity_fig = px.line(
+        monthly_activity,
+        x="trade_month",
+        y="trade_count",
+        markers=True,
+        title="Monthly Trade Count"
+    )
+
+    activity_fig.update_layout(
+        xaxis_title="Trade Month",
+        yaxis_title="Number of Trades",
+        hovermode="x unified"
+    )
+
+    st.plotly_chart(activity_fig, use_container_width=True)
 
     # --------------------------------------------------------
     # Trading Frequency
     # --------------------------------------------------------
 
-    st.subheader("Trading Frequency by CUSIP")
+    st.subheader("2. Most Frequently Traded CUSIPs")
 
     freq_fig = px.bar(
         liq.sort_values("trade_count", ascending=False).head(25),
@@ -919,53 +893,11 @@ if not liq.empty:
 
     st.plotly_chart(freq_fig, use_container_width=True)
 
-
-    # --------------------------------------------------------
-    # Liquidity Map
-    # --------------------------------------------------------
-
-    # --------------------------------------------------------
-# Liquidity Ranking Table
-# --------------------------------------------------------
-
-st.subheader("Liquidity Ranking")
-
-liq_rank = liq.copy()
-
-liq_rank = liq_rank.sort_values(
-    ["liquidity_score", "trade_count"],
-    ascending=False
-)
-
-display_cols = [
-    "cusip",
-    "liquidity_tier",
-    "liquidity_score",
-    "trade_count",
-    "recent_90d_trades",
-    "days_since_last_trade",
-    "avg_days_between_trades",
-    "avg_trade_amount",
-    "total_trade_amount",
-    "turnover_ratio",
-    "avg_yield",
-    "yield_range",
-    "maturity"
-]
-
-display_cols = [c for c in display_cols if c in liq_rank.columns]
-
-st.dataframe(
-    liq_rank[display_cols],
-    use_container_width=True,
-    height=500
-)
-
     # --------------------------------------------------------
     # Trade Recency Histogram
     # --------------------------------------------------------
 
-    st.subheader("Trade Recency Distribution")
+    st.subheader("3. Trade Recency / Staleness")
 
     recency_fig = px.histogram(
         liq,
@@ -982,36 +914,143 @@ st.dataframe(
 
     st.plotly_chart(recency_fig, use_container_width=True)
 
-
     # --------------------------------------------------------
-    # Yield Stability
+    # Yield Range Distribution
     # --------------------------------------------------------
 
-    st.subheader("Yield Stability vs Liquidity")
+    st.subheader("4. Yield Dispersion")
 
-    stability_fig = px.scatter(
+    yield_hist = px.histogram(
         liq,
         x="yield_range",
-        y="trade_count",
-        size="total_trade_amount",
         color="liquidity_tier",
-        hover_data=[
-            "cusip",
-            "avg_yield",
-            "days_since_last_trade",
-            "avg_trade_amount"
-        ],
-        title="Yield Volatility vs Trading Frequency"
+        nbins=25,
+        barmode="overlay",
+        title="Distribution of Yield Range by CUSIP"
     )
 
-    stability_fig.update_layout(
+    yield_hist.update_layout(
         xaxis_title="Yield Range",
-        yaxis_title="Trade Count"
+        yaxis_title="Number of CUSIPs"
     )
 
-    st.plotly_chart(stability_fig, use_container_width=True)
+    st.plotly_chart(yield_hist, use_container_width=True)
+
+    # --------------------------------------------------------
+    # Total Volume by Liquidity Tier
+    # --------------------------------------------------------
+
+    st.subheader("5. Liquidity Tier Composition")
+
+    tier_summary = (
+        liq
+        .groupby("liquidity_tier", as_index=False)
+        .agg(
+            cusip_count=("cusip", "count"),
+            total_trade_amount=("total_trade_amount", "sum"),
+            avg_trade_count=("trade_count", "mean"),
+            avg_days_since_last_trade=("days_since_last_trade", "mean")
+        )
+    )
+
+    tier_fig = px.bar(
+        tier_summary,
+        x="liquidity_tier",
+        y="total_trade_amount",
+        hover_data=["cusip_count", "avg_trade_count", "avg_days_since_last_trade"],
+        title="Total Trade Volume by Liquidity Tier"
+    )
+
+    tier_fig.update_layout(
+        xaxis_title="Liquidity Tier",
+        yaxis_title="Total Trade Amount"
+    )
+
+    st.plotly_chart(tier_fig, use_container_width=True)
+
+    # --------------------------------------------------------
+    # Liquidity Ranking Table
+    # --------------------------------------------------------
+
+    st.subheader("6. Liquidity Ranking Table")
+
+    display_cols = [
+        "cusip",
+        "liquidity_tier",
+        "liquidity_score",
+        "trade_count",
+        "recent_90d_trades",
+        "active_months",
+        "avg_trades_per_month",
+        "avg_days_between_trades",
+        "days_since_last_trade",
+        "first_trade",
+        "latest_trade",
+        "avg_yield",
+        "yield_range",
+        "avg_price",
+        "total_trade_amount",
+        "avg_trade_amount",
+        "turnover_ratio",
+        "maturity",
+        "coupon",
+        "outstanding_amount",
+    ]
+
+    display_cols = [c for c in display_cols if c in liq.columns]
+
+    st.dataframe(
+        liq[display_cols],
+        use_container_width=True,
+        height=500
+    )
 
 
+# ============================================================
+# Bond Master Section
+# ============================================================
+
+st.header("Bond Master / Security Reference")
+
+bond_display_cols = [
+    "issuer", "sector", "primary_type", "election", "series", "cusip",
+    "secondary_credit", "term", "maturity", "par_amount",
+    "outstanding_amount", "coupon", "call_date", "call_price",
+    "fed_tax", "amt"
+]
+
+bond_display_cols = [c for c in bond_display_cols if c in issuer_bonds.columns]
+
+if issuer_bonds.empty:
+    st.info("No bonds found for this issuer.")
+else:
+    st.dataframe(
+        issuer_bonds[bond_display_cols].sort_values(["maturity", "cusip"]),
+        use_container_width=True
+    )
+
+
+# ============================================================
+# Trade History Section
+# ============================================================
+
+st.header("Underlying Trade Detail")
+
+if issuer_trades.empty:
+    st.info("No trade rows found for this issuer and filter.")
+else:
+    trade_display_cols = [
+        "trade_datetime", "cusip", "description", "maturity_trade",
+        "maturity_bond", "maturity_bucket", "coupon_trade", "yield",
+        "price", "trade_amount", "spread", "trade_type", "ratings_m_s_f"
+    ]
+
+    trade_display_cols = [c for c in trade_display_cols if c in issuer_trades.columns]
+
+    st.dataframe(
+        issuer_trades[trade_display_cols].sort_values("trade_datetime", ascending=False),
+        use_container_width=True
+    )
 
 
 # ============================================================
