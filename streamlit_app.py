@@ -803,12 +803,14 @@ else:
 # ============================================================
 
 st.header("Liquidity Analysis")
+st.caption(
+    "Logic: first observe market activity over time, then identify the most frequently traded CUSIPs, "
+    "then check recency/staleness, then evaluate yield dispersion, and finally review the detailed data tables."
+)
 
 if issuer_trades.empty:
     st.info("No issuer trade data available for liquidity analysis.")
 else:
-    st.subheader("Liquidity / Trading Frequency Analysis by CUSIP")
-
     today = pd.Timestamp.today().normalize()
 
     liq_base = issuer_trades.copy()
@@ -887,50 +889,67 @@ else:
         ascending=False
     )
 
-    summary_cols = [
-        "cusip",
-        "liquidity_tier",
-        "liquidity_score",
-        "trade_count",
-        "recent_90d_trades",
-        "active_months",
-        "avg_trades_per_month",
-        "avg_days_between_trades",
-        "days_since_last_trade",
-        "first_trade",
-        "latest_trade",
-        "avg_yield",
-        "yield_range",
-        "avg_price",
-        "total_trade_amount",
-        "avg_trade_amount",
-        "median_trade_amount",
-        "turnover_ratio",
-        "maturity",
-        "coupon",
-        "outstanding_amount",
-    ]
+    if liq.empty:
+        st.info("No CUSIP-level liquidity data available after filtering.")
+    else:
+        # ============================================================
+        # Liquidity Charts First
+        # ============================================================
 
-    summary_cols = [c for c in summary_cols if c in liq.columns]
+        st.subheader("1. Market Activity Over Time")
+        st.caption("Start here: this shows whether secondary trading activity is rising, falling, or clustering in specific months.")
 
-    st.dataframe(
-        liq[summary_cols],
-        use_container_width=True,
-        height=500
-    )
+        monthly_activity = (
+            liq_base
+            .groupby("trade_month", as_index=False)
+            .agg(
+                trade_count=("trade_date", "count"),
+                total_trade_amount=("trade_amount", "sum"),
+                avg_yield=("yield", "mean")
+            )
+            .sort_values("trade_month")
+        )
+
+        monthly_activity["trade_month_date"] = pd.to_datetime(
+            monthly_activity["trade_month"] + "-01",
+            errors="coerce"
+        )
+
+        monthly_count_fig = px.line(
+            monthly_activity,
+            x="trade_month_date",
+            y="trade_count",
+            markers=True,
+            hover_data=["total_trade_amount", "avg_yield"],
+            title="Monthly Trade Count"
+        )
+
+        monthly_count_fig.update_layout(
+            xaxis_title="Trade Month",
+            yaxis_title="Trade Count",
+            hovermode="x unified"
+        )
+
+        st.plotly_chart(monthly_count_fig, use_container_width=True)
+
+        monthly_volume_fig = px.bar(
+            monthly_activity,
+            x="trade_month_date",
+            y="total_trade_amount",
+            hover_data=["trade_count", "avg_yield"],
+            title="Monthly Total Trading Volume"
+        )
+
+        monthly_volume_fig.update_layout(
+            xaxis_title="Trade Month",
+            yaxis_title="Total Trade Amount"
+        )
+
+        st.plotly_chart(monthly_volume_fig, use_container_width=True)
 
 
-    # ============================================================
-    # Liquidity Visualizations
-    # ============================================================
-
-    if not liq.empty:
-
-        # --------------------------------------------------------
-        # Trading Frequency
-        # --------------------------------------------------------
-
-        st.subheader("Trading Frequency by CUSIP")
+        st.subheader("2. Most Frequently Traded CUSIPs")
+        st.caption("Then identify the securities with the deepest observable trading history.")
 
         freq_fig = px.bar(
             liq.sort_values("trade_count", ascending=False).head(25),
@@ -947,7 +966,7 @@ else:
                 "avg_yield",
                 "maturity"
             ],
-            title="Top 25 Most Frequently Traded CUSIPs"
+            title="Top 25 CUSIPs by Trade Count"
         )
 
         freq_fig.update_layout(
@@ -960,11 +979,109 @@ else:
         st.plotly_chart(freq_fig, use_container_width=True)
 
 
-        # --------------------------------------------------------
-        # Liquidity Ranking
-        # --------------------------------------------------------
+        st.subheader("3. Trade Recency / Staleness")
+        st.caption("Frequency is not enough. This checks whether bonds are still actively trading or only had old historical prints.")
 
-        st.subheader("Liquidity Ranking")
+        recency_fig = px.histogram(
+            liq,
+            x="days_since_last_trade",
+            color="liquidity_tier",
+            nbins=30,
+            barmode="overlay",
+            title="Distribution of Days Since Last Trade"
+        )
+
+        recency_fig.update_layout(
+            xaxis_title="Days Since Last Trade",
+            yaxis_title="Number of CUSIPs",
+            legend_title="Liquidity Tier"
+        )
+
+        st.plotly_chart(recency_fig, use_container_width=True)
+
+        recent_bar = (
+            liq.sort_values("recent_90d_trades", ascending=False)
+            .head(25)
+            .copy()
+        )
+
+        recent_fig = px.bar(
+            recent_bar,
+            x="cusip",
+            y="recent_90d_trades",
+            color="liquidity_tier",
+            hover_data=["trade_count", "days_since_last_trade", "total_trade_amount", "avg_yield"],
+            title="Top 25 CUSIPs by Recent 90-Day Trade Count"
+        )
+
+        recent_fig.update_layout(
+            xaxis_title="CUSIP",
+            yaxis_title="Recent 90-Day Trades",
+            legend_title="Liquidity Tier",
+            xaxis_tickangle=-45
+        )
+
+        st.plotly_chart(recent_fig, use_container_width=True)
+
+
+        st.subheader("4. Yield Dispersion")
+        st.caption("After activity and recency, inspect how dispersed the observed yields are across each CUSIP's trade history.")
+
+        yield_hist = px.histogram(
+            liq,
+            x="yield_range",
+            color="liquidity_tier",
+            nbins=25,
+            barmode="overlay",
+            title="Distribution of Yield Range by Liquidity Tier"
+        )
+
+        yield_hist.update_layout(
+            xaxis_title="Yield Range",
+            yaxis_title="Number of CUSIPs",
+            legend_title="Liquidity Tier"
+        )
+
+        st.plotly_chart(yield_hist, use_container_width=True)
+
+
+        st.subheader("5. Liquidity Tier Composition")
+        st.caption("Finally, summarize how much trading volume sits in each liquidity tier.")
+
+        tier_volume = (
+            liq
+            .groupby("liquidity_tier", as_index=False)
+            .agg(
+                total_trade_amount=("total_trade_amount", "sum"),
+                cusip_count=("cusip", "count"),
+                avg_trade_count=("trade_count", "mean"),
+                avg_days_since_last_trade=("days_since_last_trade", "mean")
+            )
+            .sort_values("total_trade_amount", ascending=False)
+        )
+
+        tier_fig = px.bar(
+            tier_volume,
+            x="liquidity_tier",
+            y="total_trade_amount",
+            hover_data=["cusip_count", "avg_trade_count", "avg_days_since_last_trade"],
+            title="Total Trade Amount by Liquidity Tier"
+        )
+
+        tier_fig.update_layout(
+            xaxis_title="Liquidity Tier",
+            yaxis_title="Total Trade Amount"
+        )
+
+        st.plotly_chart(tier_fig, use_container_width=True)
+
+
+        # ============================================================
+        # Data Tables After Charts
+        # ============================================================
+
+        st.subheader("6. Liquidity Ranking Table")
+        st.caption("Detailed ranking table after the charts. Use this to inspect the exact CUSIPs behind the visual patterns.")
 
         liq_rank = liq.sort_values(
             ["liquidity_score", "trade_count"],
@@ -995,125 +1112,40 @@ else:
             height=500
         )
 
+        st.subheader("7. Full CUSIP-Level Liquidity Data")
+        st.caption("Full calculation table including frequency, recency, volume, pricing, and maturity fields.")
 
-        # --------------------------------------------------------
-        # Trade Recency Distribution
-        # --------------------------------------------------------
+        summary_cols = [
+            "cusip",
+            "liquidity_tier",
+            "liquidity_score",
+            "trade_count",
+            "recent_90d_trades",
+            "active_months",
+            "avg_trades_per_month",
+            "avg_days_between_trades",
+            "days_since_last_trade",
+            "first_trade",
+            "latest_trade",
+            "avg_yield",
+            "yield_range",
+            "avg_price",
+            "total_trade_amount",
+            "avg_trade_amount",
+            "median_trade_amount",
+            "turnover_ratio",
+            "maturity",
+            "coupon",
+            "outstanding_amount",
+        ]
 
-        st.subheader("Trade Recency Distribution")
+        summary_cols = [c for c in summary_cols if c in liq.columns]
 
-        recency_fig = px.histogram(
-            liq,
-            x="days_since_last_trade",
-            color="liquidity_tier",
-            nbins=30,
-            barmode="overlay",
-            title="Distribution of Days Since Last Trade"
+        st.dataframe(
+            liq[summary_cols],
+            use_container_width=True,
+            height=500
         )
-
-        recency_fig.update_layout(
-            xaxis_title="Days Since Last Trade",
-            yaxis_title="Number of CUSIPs",
-            legend_title="Liquidity Tier"
-        )
-
-        st.plotly_chart(recency_fig, use_container_width=True)
-
-
-        # --------------------------------------------------------
-        # Yield Range Distribution
-        # --------------------------------------------------------
-
-        st.subheader("Yield Range Distribution")
-
-        yield_hist = px.histogram(
-            liq,
-            x="yield_range",
-            color="liquidity_tier",
-            nbins=25,
-            barmode="overlay",
-            title="Distribution of Yield Range by Liquidity Tier"
-        )
-
-        yield_hist.update_layout(
-            xaxis_title="Yield Range",
-            yaxis_title="Number of CUSIPs",
-            legend_title="Liquidity Tier"
-        )
-
-        st.plotly_chart(yield_hist, use_container_width=True)
-
-
-        # --------------------------------------------------------
-        # Monthly Trading Activity
-        # --------------------------------------------------------
-
-        st.subheader("Monthly Trading Activity")
-
-        monthly_activity = (
-            liq_base
-            .groupby("trade_month", as_index=False)
-            .agg(
-                trade_count=("trade_date", "count"),
-                total_trade_amount=("trade_amount", "sum"),
-                avg_yield=("yield", "mean")
-            )
-            .sort_values("trade_month")
-        )
-
-        monthly_activity["trade_month_date"] = pd.to_datetime(
-            monthly_activity["trade_month"] + "-01",
-            errors="coerce"
-        )
-
-        monthly_fig = px.line(
-            monthly_activity,
-            x="trade_month_date",
-            y="trade_count",
-            markers=True,
-            hover_data=["total_trade_amount", "avg_yield"],
-            title="Monthly Trade Count"
-        )
-
-        monthly_fig.update_layout(
-            xaxis_title="Trade Month",
-            yaxis_title="Trade Count"
-        )
-
-        st.plotly_chart(monthly_fig, use_container_width=True)
-
-
-        # --------------------------------------------------------
-        # Total Volume by Liquidity Tier
-        # --------------------------------------------------------
-
-        st.subheader("Total Volume by Liquidity Tier")
-
-        tier_volume = (
-            liq
-            .groupby("liquidity_tier", as_index=False)
-            .agg(
-                total_trade_amount=("total_trade_amount", "sum"),
-                cusip_count=("cusip", "count"),
-                avg_trade_count=("trade_count", "mean")
-            )
-            .sort_values("total_trade_amount", ascending=False)
-        )
-
-        tier_fig = px.bar(
-            tier_volume,
-            x="liquidity_tier",
-            y="total_trade_amount",
-            hover_data=["cusip_count", "avg_trade_count"],
-            title="Total Trade Amount by Liquidity Tier"
-        )
-
-        tier_fig.update_layout(
-            xaxis_title="Liquidity Tier",
-            yaxis_title="Total Trade Amount"
-        )
-
-        st.plotly_chart(tier_fig, use_container_width=True)
 
 
 # ============================================================
