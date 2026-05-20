@@ -682,7 +682,7 @@ else:
         use_container_width=True
     )
 
-    # ============================================================
+# ============================================================
 # Yield Trend Comparison
 # ============================================================
 
@@ -847,56 +847,129 @@ volume_fig.update_layout(
 
 st.plotly_chart(volume_fig, use_container_width=True)
 
-st.subheader("Trading Frequency by CUSIP")
+# ============================================================
+# Liquidity Visualizations
+# ============================================================
 
-freq_fig = px.bar(
-    liq.sort_values("trade_count", ascending=False).head(25),
-    x="cusip",
-    y="trade_count",
-    color="liquidity_tier",
-    hover_data=[
-        "recent_90d_trades",
-        "avg_trades_per_month",
-        "days_since_last_trade",
-        "total_trade_amount"
-    ],
-    title="Top 25 Most Frequently Traded CUSIPs"
-)
+if not liq.empty:
 
-freq_fig.update_layout(
-    xaxis_title="CUSIP",
-    yaxis_title="Trade Count",
-    legend_title="Liquidity Tier"
-)
+    # --------------------------------------------------------
+    # Trading Frequency
+    # --------------------------------------------------------
 
-st.plotly_chart(freq_fig, use_container_width=True)
+    st.subheader("Trading Frequency by CUSIP")
+
+    freq_fig = px.bar(
+        liq.sort_values("trade_count", ascending=False).head(25),
+        x="cusip",
+        y="trade_count",
+        color="liquidity_tier",
+        hover_data=[
+            "recent_90d_trades",
+            "avg_trades_per_month",
+            "avg_days_between_trades",
+            "days_since_last_trade",
+            "total_trade_amount",
+            "avg_trade_amount",
+            "avg_yield",
+            "maturity"
+        ],
+        title="Top 25 Most Frequently Traded CUSIPs"
+    )
+
+    freq_fig.update_layout(
+        xaxis_title="CUSIP",
+        yaxis_title="Trade Count",
+        legend_title="Liquidity Tier",
+        xaxis_tickangle=-45
+    )
+
+    st.plotly_chart(freq_fig, use_container_width=True)
 
 
-st.subheader("Recent Activity vs Total Volume")
+    # --------------------------------------------------------
+    # Liquidity Map
+    # --------------------------------------------------------
 
-volume_fig = px.scatter(
-    liq,
-    x="days_since_last_trade",
-    y="total_trade_amount",
-    size="trade_count",
-    color="liquidity_tier",
-    hover_data=[
-        "cusip",
-        "recent_90d_trades",
-        "avg_days_between_trades",
-        "avg_yield",
-        "maturity"
-    ],
-    title="Liquidity Map: Recency vs Trading Volume"
-)
+    st.subheader("Recent Activity vs Total Volume")
 
-volume_fig.update_layout(
-    xaxis_title="Days Since Last Trade",
-    yaxis_title="Total Trade Amount",
-    legend_title="Liquidity Tier"
-)
+    volume_fig = px.scatter(
+        liq,
+        x="days_since_last_trade",
+        y="total_trade_amount",
+        size="trade_count",
+        color="liquidity_tier",
+        hover_data=[
+            "cusip",
+            "recent_90d_trades",
+            "avg_days_between_trades",
+            "avg_yield",
+            "yield_range",
+            "avg_trade_amount",
+            "turnover_ratio",
+            "maturity"
+        ],
+        title="Liquidity Map: Recency vs Trading Volume"
+    )
 
-st.plotly_chart(volume_fig, use_container_width=True)
+    volume_fig.update_layout(
+        xaxis_title="Days Since Last Trade",
+        yaxis_title="Total Trade Amount",
+        legend_title="Liquidity Tier"
+    )
+
+    st.plotly_chart(volume_fig, use_container_width=True)
+
+
+    # --------------------------------------------------------
+    # Trade Recency Histogram
+    # --------------------------------------------------------
+
+    st.subheader("Trade Recency Distribution")
+
+    recency_fig = px.histogram(
+        liq,
+        x="days_since_last_trade",
+        nbins=30,
+        color="liquidity_tier",
+        title="Distribution of Days Since Last Trade"
+    )
+
+    recency_fig.update_layout(
+        xaxis_title="Days Since Last Trade",
+        yaxis_title="Number of CUSIPs"
+    )
+
+    st.plotly_chart(recency_fig, use_container_width=True)
+
+
+    # --------------------------------------------------------
+    # Yield Stability
+    # --------------------------------------------------------
+
+    st.subheader("Yield Stability vs Liquidity")
+
+    stability_fig = px.scatter(
+        liq,
+        x="yield_range",
+        y="trade_count",
+        size="total_trade_amount",
+        color="liquidity_tier",
+        hover_data=[
+            "cusip",
+            "avg_yield",
+            "days_since_last_trade",
+            "avg_trade_amount"
+        ],
+        title="Yield Volatility vs Trading Frequency"
+    )
+
+    stability_fig.update_layout(
+        xaxis_title="Yield Range",
+        yaxis_title="Trade Count"
+    )
+
+    st.plotly_chart(stability_fig, use_container_width=True)
 
 
 # ============================================================
