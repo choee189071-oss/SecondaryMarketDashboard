@@ -1,7 +1,6 @@
 import os
 import glob
 import re
-import json
 from pathlib import Path
 
 import pandas as pd
@@ -28,14 +27,6 @@ st.caption("Issuer / Bond / Trade History Dashboard")
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-
-# Persistent local cache for heavy trade history files.
-# This makes reload incremental: only new/changed trade files are parsed.
-CACHE_DIR = Path("cache")
-CACHE_DIR.mkdir(exist_ok=True)
-
-TRADE_CACHE_FILE = CACHE_DIR / "merged_trades.parquet"
-PROCESSED_TRADE_FILES = CACHE_DIR / "processed_trade_files.json"
 
 BONDS_FILE_CANDIDATES = [
     DATA_DIR / "Bonds.csv",
@@ -71,69 +62,6 @@ def find_first_existing(paths):
         if Path(p).exists():
             return Path(p)
     return None
-
-
-def list_trade_files():
-    """Return unique trade files from all supported locations/patterns."""
-    files = []
-    for pattern in TRADE_FILE_PATTERNS:
-        files.extend(glob.glob(pattern))
-
-    seen = set()
-    unique_files = []
-    for f in files:
-        path = Path(f)
-        key = str(path.resolve())
-        if key not in seen:
-            seen.add(key)
-            unique_files.append(path)
-
-    return sorted(unique_files, key=lambda x: x.name.lower())
-
-
-def file_fingerprint(path):
-    """
-    Lightweight file fingerprint.
-    If same filename is replaced/updated, size or modified time should change,
-    so the dashboard knows to re-process that file.
-    """
-    path = Path(path)
-    stat = path.stat()
-    return {
-        "path": str(path.resolve()),
-        "source_file": path.name,
-        "size_bytes": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
-    }
-
-
-def load_processed_trade_files():
-    if not PROCESSED_TRADE_FILES.exists():
-        return {}
-
-    try:
-        with open(PROCESSED_TRADE_FILES, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def save_processed_trade_files(processed):
-    CACHE_DIR.mkdir(exist_ok=True)
-    with open(PROCESSED_TRADE_FILES, "w", encoding="utf-8") as f:
-        json.dump(processed, f, indent=2)
-
-
-def read_trade_cache():
-    if not TRADE_CACHE_FILE.exists():
-        return pd.DataFrame()
-    return pd.read_parquet(TRADE_CACHE_FILE)
-
-
-def write_trade_cache(df):
-    CACHE_DIR.mkdir(exist_ok=True)
-    df.to_parquet(TRADE_CACHE_FILE, index=False)
 
 
 def clean_colname(col):
@@ -342,105 +270,30 @@ def load_bonds():
 
 @st.cache_data(show_spinner=False)
 def load_trades():
-    """
-    Incremental trade loader.
+    files = []
+    for pattern in TRADE_FILE_PATTERNS:
+        files.extend(glob.glob(pattern))
 
-    First run:
-        - Reads every trade file.
-        - Standardizes and saves everything into cache/merged_trades.parquet.
-        - Records file fingerprints in cache/processed_trade_files.json.
-
-    Later reloads:
-        - Skips unchanged files.
-        - Processes only new or changed files.
-        - Removes cached rows for deleted trade files.
-    """
-    unique_files = list_trade_files()
-    current_fingerprints = {str(f.resolve()): file_fingerprint(f) for f in unique_files}
-
-    processed = load_processed_trade_files()
-
-    cache_exists = TRADE_CACHE_FILE.exists()
-    try:
-        cached_trades = read_trade_cache() if cache_exists else pd.DataFrame()
-    except Exception:
-        # If the cache is corrupted or parquet engine changes, rebuild safely.
-        cached_trades = pd.DataFrame()
-        processed = {}
-        cache_exists = False
-
-    new_or_changed_files = []
-    skipped_files = []
-
-    for f in unique_files:
-        key = str(f.resolve())
-        current_sig = current_fingerprints[key]
-        old_sig = processed.get(key)
-
-        if cache_exists and old_sig == current_sig:
-            skipped_files.append(f)
-        else:
-            new_or_changed_files.append(f)
-
-    # If a trade file was deleted, remove its rows from the persistent cache.
-    removed_keys = sorted(set(processed.keys()) - set(current_fingerprints.keys()))
-    removed_source_files = [processed[k].get("source_file") for k in removed_keys if isinstance(processed.get(k), dict)]
-
-    if removed_source_files and not cached_trades.empty and "source_file" in cached_trades.columns:
-        cached_trades = cached_trades[~cached_trades["source_file"].isin(removed_source_files)].copy()
-        for k in removed_keys:
-            processed.pop(k, None)
+    seen = set()
+    unique_files = []
+    for f in files:
+        if f not in seen:
+            seen.add(f)
+            unique_files.append(f)
 
     trade_frames = []
     failed_files = []
 
-    for f in new_or_changed_files:
+    for f in unique_files:
         try:
             raw = read_trade_file(f)
             trade_frames.append(standardize_trades(raw, source_file=f))
-            processed[str(f.resolve())] = current_fingerprints[str(f.resolve())]
         except Exception as e:
             failed_files.append((Path(f).name, str(e)))
 
-    if trade_frames:
-        new_trades = pd.concat(trade_frames, ignore_index=True)
+    trades = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
+    return trades, unique_files, failed_files
 
-        # For changed files, replace old cached rows from those source files first.
-        changed_source_files = [Path(f).name for f in new_or_changed_files]
-        if not cached_trades.empty and "source_file" in cached_trades.columns:
-            cached_trades = cached_trades[~cached_trades["source_file"].isin(changed_source_files)].copy()
-
-        trades = pd.concat([cached_trades, new_trades], ignore_index=True)
-
-        # Conservative duplicate protection in case the same file pattern is picked up twice.
-        dedupe_cols = [
-            "source_file", "trade_datetime", "cusip", "trade_date",
-            "yield", "price", "trade_amount", "trade_type"
-        ]
-        dedupe_cols = [c for c in dedupe_cols if c in trades.columns]
-        if dedupe_cols:
-            trades = trades.drop_duplicates(subset=dedupe_cols, keep="last")
-
-        write_trade_cache(trades)
-        save_processed_trade_files(processed)
-
-    else:
-        trades = cached_trades.copy()
-        if removed_source_files:
-            write_trade_cache(trades)
-            save_processed_trade_files(processed)
-
-    cache_status = {
-        "cache_file": str(TRADE_CACHE_FILE),
-        "cache_exists": TRADE_CACHE_FILE.exists(),
-        "total_trade_files_found": len(unique_files),
-        "new_or_changed_files_loaded": len(new_or_changed_files),
-        "unchanged_files_skipped": len(skipped_files),
-        "removed_files_from_cache": len(removed_source_files),
-        "cached_trade_rows": len(trades),
-    }
-
-    return trades, [str(f) for f in unique_files], failed_files, cache_status
 
 @st.cache_data(show_spinner=False)
 def load_issuers_from_csv():
@@ -533,17 +386,6 @@ with st.sidebar:
     st.header("Data Control")
 
     if st.button("Reload Data"):
-        # Incremental reload: clears Streamlit's memory cache,
-        # but keeps cache/merged_trades.parquet so unchanged files are skipped.
-        st.cache_data.clear()
-        st.rerun()
-
-    if st.button("Rebuild Trade Cache"):
-        # Full rebuild: use this only when you want to force reprocessing all trade files.
-        if TRADE_CACHE_FILE.exists():
-            TRADE_CACHE_FILE.unlink()
-        if PROCESSED_TRADE_FILES.exists():
-            PROCESSED_TRADE_FILES.unlink()
         st.cache_data.clear()
         st.rerun()
 
@@ -553,7 +395,7 @@ with st.sidebar:
 # ============================================================
 
 bonds_df, bonds_file = load_bonds()
-trades_df, trade_files, failed_trade_files, trade_cache_status = load_trades()
+trades_df, trade_files, failed_trade_files = load_trades()
 issuers_csv_df = load_issuers_from_csv()
 mmd_df, mmd_file = load_mmd()
 
@@ -728,10 +570,7 @@ with st.sidebar.expander("Correct Existing Issuer"):
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Bonds file: {bonds_file.name if bonds_file else 'None'}")
 st.sidebar.caption(f"Issuer file: {ISSUER_FILE.name}")
-st.sidebar.caption(f"Trade files found: {len(trade_files)}")
-st.sidebar.caption(f"New/changed loaded this reload: {trade_cache_status.get('new_or_changed_files_loaded', 0)}")
-st.sidebar.caption(f"Unchanged skipped: {trade_cache_status.get('unchanged_files_skipped', 0)}")
-st.sidebar.caption(f"Cached trade rows: {trade_cache_status.get('cached_trade_rows', 0):,}")
+st.sidebar.caption(f"Trade files loaded: {len(trade_files)}")
 
 if failed_trade_files:
     with st.sidebar.expander("Failed trade files"):
@@ -1275,8 +1114,7 @@ if show_raw_tables:
     if market_df.empty:
         st.info("No trade files loaded.")
     else:
-        st.caption("Showing first 20,000 rows for performance. Full data remains available in the cache/processing layer.")
-        st.dataframe(market_df.head(20000), use_container_width=True)
+        st.dataframe(market_df, use_container_width=True)
 
     st.subheader("MMD")
     if mmd_df.empty:
