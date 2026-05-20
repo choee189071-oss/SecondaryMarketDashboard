@@ -796,26 +796,107 @@ else:
 
         st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Liquidity Summary by CUSIP")
+    st.subheader("Trading Frequency by CUSIP")
 
-    liq = (
-        issuer_trades
-        .groupby("cusip", dropna=False)
-        .agg(
-            trade_count=("trade_date", "count"),
-            latest_trade=("trade_date", "max"),
-            avg_yield=("yield", "mean"),
-            avg_price=("price", "mean"),
-            total_trade_amount=("trade_amount", "sum"),
-            maturity=("maturity_bond", "first"),
-            coupon=("coupon_bond", "first"),
-            outstanding_amount=("outstanding_amount", "first"),
-        )
-        .reset_index()
-        .sort_values(["trade_count", "total_trade_amount"], ascending=False)
-    )
+freq_fig = px.bar(
+    liq.sort_values("trade_count", ascending=False).head(25),
+    x="cusip",
+    y="trade_count",
+    color="liquidity_tier",
+    hover_data=[
+        "recent_90d_trades",
+        "avg_trades_per_month",
+        "days_since_last_trade",
+        "total_trade_amount"
+    ],
+    title="Top 25 Most Frequently Traded CUSIPs"
+)
 
-    st.dataframe(liq, use_container_width=True)
+freq_fig.update_layout(
+    xaxis_title="CUSIP",
+    yaxis_title="Trade Count",
+    legend_title="Liquidity Tier"
+)
+
+st.plotly_chart(freq_fig, use_container_width=True)
+
+
+st.subheader("Recent Activity vs Total Volume")
+
+volume_fig = px.scatter(
+    liq,
+    x="days_since_last_trade",
+    y="total_trade_amount",
+    size="trade_count",
+    color="liquidity_tier",
+    hover_data=[
+        "cusip",
+        "recent_90d_trades",
+        "avg_days_between_trades",
+        "avg_yield",
+        "maturity"
+    ],
+    title="Liquidity Map: Recency vs Trading Volume"
+)
+
+volume_fig.update_layout(
+    xaxis_title="Days Since Last Trade",
+    yaxis_title="Total Trade Amount",
+    legend_title="Liquidity Tier"
+)
+
+st.plotly_chart(volume_fig, use_container_width=True)
+
+st.subheader("Trading Frequency by CUSIP")
+
+freq_fig = px.bar(
+    liq.sort_values("trade_count", ascending=False).head(25),
+    x="cusip",
+    y="trade_count",
+    color="liquidity_tier",
+    hover_data=[
+        "recent_90d_trades",
+        "avg_trades_per_month",
+        "days_since_last_trade",
+        "total_trade_amount"
+    ],
+    title="Top 25 Most Frequently Traded CUSIPs"
+)
+
+freq_fig.update_layout(
+    xaxis_title="CUSIP",
+    yaxis_title="Trade Count",
+    legend_title="Liquidity Tier"
+)
+
+st.plotly_chart(freq_fig, use_container_width=True)
+
+
+st.subheader("Recent Activity vs Total Volume")
+
+volume_fig = px.scatter(
+    liq,
+    x="days_since_last_trade",
+    y="total_trade_amount",
+    size="trade_count",
+    color="liquidity_tier",
+    hover_data=[
+        "cusip",
+        "recent_90d_trades",
+        "avg_days_between_trades",
+        "avg_yield",
+        "maturity"
+    ],
+    title="Liquidity Map: Recency vs Trading Volume"
+)
+
+volume_fig.update_layout(
+    xaxis_title="Days Since Last Trade",
+    yaxis_title="Total Trade Amount",
+    legend_title="Liquidity Tier"
+)
+
+st.plotly_chart(volume_fig, use_container_width=True)
 
 
 # ============================================================
